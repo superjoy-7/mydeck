@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
 import { loadCards, getCardsByBase, searchCards, deleteCard, getDynamicKnowledgeBases, getKnowledgeBaseName, getKnowledgeBaseColor, getKnowledgeBasePalette, loadSessions, saveSessions } from '@/lib/data';
 import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, CardReference } from '@/lib/llm';
+import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
 
 interface ChatSession {
@@ -42,6 +43,11 @@ export default function Home() {
 
   // Chat panel collapse state
   const [chatPanelCollapsed, setChatPanelCollapsed] = useState(false);
+
+  // Backup panel state
+  const [showBackup, setShowBackup] = useState(false);
+  const [backupFeedback, setBackupFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize on mount (client-only)
   useEffect(() => {
@@ -592,15 +598,156 @@ export default function Home() {
           )}
         </nav>
 
-        {/* Status */}
+        {/* Status + Backup */}
         <div className="p-4 border-t" style={{ borderColor: '#DFE2DE' }}>
-          <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F1F0' }}>
+          {/* Status */}
+          <div className="rounded-xl p-3 mb-2" style={{ backgroundColor: '#F0F1F0' }}>
             <div className="flex items-center gap-2 text-xs" style={{ color: '#42423A' }}>
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: llmConfigured ? '#769365' : '#DC2626' }} />
               {llmConfigured ? 'AI 助手已连接' : '未配置模型接口'}
             </div>
             <p className="text-xs mt-1" style={{ color: '#8A9199' }}>基于 {getTotalCardCount()} 张卡片</p>
           </div>
+
+          {/* Backup toggle */}
+          <button
+            onClick={() => setShowBackup(prev => !prev)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all"
+            style={{
+              backgroundColor: showBackup ? '#EDF3EB' : 'transparent',
+              color: '#42423A',
+            }}
+            onMouseOver={(e) => { if (!showBackup) e.currentTarget.style.backgroundColor = '#F0F1F0'; }}
+            onMouseOut={(e) => { if (!showBackup) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            <span className="flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+              数据备份
+            </span>
+            <svg
+              className="w-3 h-3 transition-transform"
+              style={{ transform: showBackup ? 'rotate(180deg)' : 'rotate(0deg)', color: '#8A9199' }}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {/* Backup panel */}
+          {showBackup && (
+            <div className="mt-2 space-y-2">
+              <p className="text-xs px-1" style={{ color: '#8A9199' }}>
+                当前数据仅保存在本浏览器，建议定期导出备份
+              </p>
+
+              {/* Export button */}
+              <button
+                onClick={() => {
+                  exportBackup();
+                  setBackupFeedback({ type: 'success', message: '备份文件已开始下载' });
+                  setTimeout(() => setBackupFeedback(null), 3000);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-medium transition-all"
+                style={{ backgroundColor: '#769365', color: 'white' }}
+                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#6a8660'}
+                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#769365'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                导出全部数据
+              </button>
+
+              {/* Import button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-medium transition-all"
+                style={{ backgroundColor: '#F0F1F0', color: '#42423A' }}
+                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#E4E7E4'}
+                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#F0F1F0'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                导入备份文件
+              </button>
+
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setBackupFeedback(null);
+
+                  let text: string;
+                  try {
+                    text = await file.text();
+                  } catch {
+                    setBackupFeedback({ type: 'error', message: '文件读取失败，请重试。' });
+                    e.target.value = '';
+                    return;
+                  }
+
+                  const validation = validateBackupJson(text);
+                  if (!validation.ok) {
+                    setBackupFeedback({ type: 'error', message: validation.error });
+                    e.target.value = '';
+                    return;
+                  }
+
+                  const { data } = validation;
+
+                  const confirmed = window.confirm(
+                    `即将用备份覆盖当前数据（${data.cards.length} 张卡片，${data.sessions.length} 条对话）。\n\n建议：导入前先点击「导出全部数据」保留当前备份。\n\n确认继续吗？`,
+                  );
+                  if (!confirmed) {
+                    e.target.value = '';
+                    return;
+                  }
+
+                  const result = restoreFromBackup(data);
+                  if (!result.ok) {
+                    setBackupFeedback({ type: 'error', message: result.error ?? '导入失败' });
+                    e.target.value = '';
+                    return;
+                  }
+
+                  // Reload UI state
+                  setCards(loadCards());
+                  setKnowledgeBases(getDynamicKnowledgeBases());
+                  const sessions = loadSessions();
+                  setSessions(sessions);
+                  setActiveSessionId(sessions[0]?.id ?? null);
+
+                  let msg = `已恢复 ${result.restoredCards} 张卡片、${result.restoredSessions} 条对话。`;
+                  if (result.warning) msg += `\n${result.warning}`;
+                  setBackupFeedback({ type: 'success', message: msg });
+                  e.target.value = '';
+                  setTimeout(() => setBackupFeedback(null), 5000);
+                }}
+              />
+
+              {/* Feedback */}
+              {backupFeedback && (
+                <div
+                  className="text-xs px-3 py-2 rounded-xl"
+                  style={
+                    backupFeedback.type === 'success'
+                      ? { backgroundColor: '#EDF3EB', color: '#4E6B42' }
+                      : { backgroundColor: '#FEF2F2', color: '#DC2626' }
+                  }
+                >
+                  {backupFeedback.message}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </aside>
 
