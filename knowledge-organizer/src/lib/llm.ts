@@ -56,6 +56,7 @@ export async function generateKnowledgeCard(
   key_points: string[];
   actionable_tips: string[];
   tags: string[];
+  suggested_base: string;
 }> {
   const response = await fetch('/api/llm/card', {
     method: 'POST',
@@ -117,4 +118,41 @@ export async function understandImage(
   }
 
   return response.json();
+}
+
+// --- Link Extraction ---
+
+export interface ExtractSuccess {
+  ok: true;
+  url: string;
+  hostname: string;
+  title: string;
+  description: string;
+  extractedText: string;
+}
+
+export interface ExtractFailure {
+  ok: false;
+  error: string;
+  stage: 'url_invalid' | 'fetch_failed' | 'parse_failed' | 'content_empty' | 'content_too_short';
+}
+
+export type ExtractResponse = ExtractSuccess | ExtractFailure;
+
+export async function extractLinkContent(url: string): Promise<ExtractSuccess> {
+  const response = await fetch('/api/link/extract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+
+  const data: ExtractFailure | ExtractSuccess = await response.json();
+
+  if (!data.ok) {
+    const err = new Error(data.error);
+    (err as Error & { stage: string }).stage = data.stage;
+    throw err;
+  }
+
+  return data;
 }

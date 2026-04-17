@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
 import { loadCards, getCardsByBase, searchCards, deleteCard, getDynamicKnowledgeBases, getKnowledgeBaseName, getKnowledgeBaseColor, getKnowledgeBasePalette, loadSessions, saveSessions } from '@/lib/data';
-import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, CardReference } from '@/lib/llm';
+import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, extractLinkContent, CardReference } from '@/lib/llm';
 import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
 
@@ -14,7 +14,7 @@ interface ChatSession {
   messages: ChatMessage[];
 }
 
-type LinkState = 'idle' | 'valid_link_fallback' | 'invalid_url';
+type LinkState = 'idle' | 'valid_link_fallback' | 'valid_url' | 'invalid_url';
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
@@ -100,6 +100,15 @@ export default function Home() {
   const activeSession = sessions.find(s => s.id === activeSessionId);
 
   // --- Link input handling ---
+  const isValidHttpUrl = (value: string): boolean => {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+
   const handleLinkChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setLinkInput(value);
@@ -112,6 +121,8 @@ export default function Home() {
 
     if (isValidXiaohongshuUrl(value)) {
       setLinkState('valid_link_fallback');
+    } else if (isValidHttpUrl(value)) {
+      setLinkState('valid_url');
     } else {
       if (value.includes('.') && !value.includes(' ')) {
         setLinkState('invalid_url');
@@ -191,9 +202,17 @@ export default function Home() {
     const content = textInput.trim();
     const url = linkInput.trim();
 
-    // Need at least text or image
-    if (!content && imageUploads.length === 0) {
-      setError('请提供文本内容或上传图片，链接仅作为来源记录。');
+    // Determine mode:
+    // 1. Image mode: images provided
+    // 2. Link extraction mode: valid http/https URL, no text, no images
+    // 3. Text mode: text provided, optional URL as source
+    const hasImages = imageUploads.length > 0;
+    const isLinkExtractionMode = linkState === 'valid_url' && !content && !hasImages;
+    const isTextMode = !!content || hasImages;
+
+    // Need at least one input mode
+    if (!isTextMode && !isLinkExtractionMode) {
+      setError('请提供文本内容、上传图片，或输入网页链接后点击"提取并生成卡片"。');
       return;
     }
 
@@ -212,8 +231,10 @@ export default function Home() {
       let actionable_tips: string[] = [];
       let tags: string[] = [];
       let suggestedBase = '其他';
+      let finalUrl = url;
+      let finalContent = content;
 
-      if (imageUploads.length > 0) {
+      if (hasImages) {
         // Image understanding — process first image, include text as context
         const result = await understandImage(imageUploads[0].base64, content || undefined);
         title = result.title;
@@ -227,6 +248,46 @@ export default function Home() {
         if (imageUploads.length > 1) {
           summary = `[多图共${imageUploads.length}张] ${summary}`;
         }
+      } else if (isLinkExtractionMode) {
+        // Extract content from URL first
+        setError('正在提取网页内容，请稍候...');
+        // Yield to render the message
+        await new Promise(r => setTimeout(r, 50));
+
+        let extractResult;
+        try {
+          extractResult = await extractLinkContent(url);
+        } catch (extractErr) {
+          const errMsg = extractErr instanceof Error ? extractErr.message : '未知错误';
+          setError(`网页内容提取失败: ${errMsg}`);
+          setIsProcessing(false);
+          return;
+        }
+
+        finalContent = extractResult.extractedText;
+        finalUrl = extractResult.url;
+
+        // Use extracted title as hint for the card title (LLM will refine it)
+        // Also pass the page title to the LLM for context
+        const pageTitleHint = extractResult.title && extractResult.title !== new URL(finalUrl).hostname
+          ? `【页面标题: ${extractResult.title}】\n`
+          : '';
+
+        setError('正在生成知识卡片，请稍候...');
+        await new Promise(r => setTimeout(r, 50));
+
+        const result = await generateKnowledgeCard(pageTitleHint + finalContent, finalUrl);
+        title = result.title;
+        summary = result.summary;
+        key_points = result.key_points;
+        actionable_tips = result.actionable_tips;
+        tags = result.tags;
+        suggestedBase = result.suggested_base;
+
+        // Use extracted title if LLM title is generic
+        if (extractResult.title && extractResult.title !== new URL(finalUrl).hostname) {
+          title = extractResult.title;
+        }
       } else {
         // Text-only
         const result = await generateKnowledgeCard(content, url);
@@ -235,19 +296,19 @@ export default function Home() {
         key_points = result.key_points;
         actionable_tips = result.actionable_tips;
         tags = result.tags;
-        suggestedBase = classifyToBase(tags, content);
+        suggestedBase = result.suggested_base;
       }
 
       // Use LLM title if good, otherwise fallback to extractTitle
-      const finalTitle = title && title !== '未命名内容' && title.length > 3 ? title : extractTitle(content);
+      const finalTitle = title && title !== '未命名内容' && title.length > 3 ? title : extractTitle(finalContent);
 
       const newCard: KnowledgeCard = {
         id: generateId(),
         title: finalTitle,
-        source_url: url || '',
-        source_type: url ? 'link' : 'text',
-        original_text: content,
-        summary: summary || content.substring(0, 120),
+        source_url: finalUrl || '',
+        source_type: finalUrl ? 'link' : 'text',
+        original_text: isLinkExtractionMode ? '' : finalContent,
+        summary: summary || finalContent.substring(0, 120),
         key_points: key_points.length > 0 ? key_points : ['暂无明确的要点提炼'],
         actionable_tips: actionable_tips || [],
         tags: tags.length > 0 ? tags : ['其他'],
@@ -269,6 +330,7 @@ export default function Home() {
       setTextInput('');
       setShowTextArea(false);
       setLinkState('idle');
+      setError(null);
       // Clean up image previews
       imageUploads.forEach(u => revokePreview(u.preview));
       setImageUploads([]);
@@ -817,7 +879,7 @@ export default function Home() {
                     type="text"
                     value={linkInput}
                     onChange={handleLinkChange}
-                    placeholder="粘贴链接记录来源（可选）..."
+                    placeholder="粘贴网页链接，可以是博客、文章、文档等..."
                     className="w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all"
                     style={{
                       borderColor: linkState === 'invalid_url' ? '#ef4444' : '#DFE2DE',
@@ -844,6 +906,20 @@ export default function Home() {
                     </div>
                   )}
                 </div>
+
+                {/* Valid URL for extraction — show info */}
+                {linkState === 'valid_url' && (
+                  <div className="p-3 rounded-lg text-sm" style={{ backgroundColor: '#EDF3EB', color: '#4E6B42' }}>
+                    <div className="flex items-start gap-2">
+                      <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <p className="text-xs" style={{ opacity: 0.9 }}>
+                        检测到网页链接。点击下方「提取并生成卡片」将从页面提取正文内容
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Image Upload — always show upload area + previews */}
                 <div>
@@ -933,7 +1009,7 @@ export default function Home() {
                 <textarea
                   value={textInput}
                   onChange={handleTextChange}
-                  placeholder="粘贴正文内容，或描述你想从图片中提取的内容..."
+                  placeholder={linkState === 'valid_url' ? '可选：粘贴补充内容，或留空使用链接中的全部正文...' : '粘贴正文内容，或描述你想从图片中提取的内容...'}
                   rows={4}
                   className="w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all resize-none"
                   style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6' }}
@@ -944,13 +1020,17 @@ export default function Home() {
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  支持：纯文本 / 纯图片（多次上传或粘贴）/ 文本+多图；暂不支持：视频自动解析 / 链接正文抓取
+                  支持：纯文本 / 粘贴图片 / 网页链接提取正文；暂不支持：视频自动解析 / 小红书正文抓取
                 </div>
 
                 {/* Process Button */}
                 <button
                   onClick={handleProcess}
-                  disabled={isProcessing || (!textInput.trim() && imageUploads.length === 0) || !llmConfigured}
+                  disabled={
+                    isProcessing ||
+                    (!textInput.trim() && imageUploads.length === 0 && linkState !== 'valid_url') ||
+                    !llmConfigured
+                  }
                   className="w-full py-3 font-medium rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{ backgroundColor: '#769365', color: 'white' }}
                 >
@@ -967,7 +1047,11 @@ export default function Home() {
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                       </svg>
-                      {imageUploads.length > 0 ? `分析${imageUploads.length > 1 ? `${imageUploads.length}张图片` : '图片'}生成卡片` : '生成知识卡片'}
+                      {imageUploads.length > 0
+                        ? `分析${imageUploads.length > 1 ? `${imageUploads.length}张图片` : '图片'}生成卡片`
+                        : linkState === 'valid_url' && !textInput.trim()
+                        ? '提取并生成卡片'
+                        : '生成知识卡片'}
                     </>
                   )}
                 </button>
@@ -1271,7 +1355,7 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
   const kbColor = getKnowledgeBaseColor(card.knowledge_base);
   const kbName = getKnowledgeBaseName(card.knowledge_base);
   const kbPalette = getKnowledgeBasePalette(card.knowledge_base);
-  const hasValidUrl = card.source_url && isValidXiaohongshuUrl(card.source_url);
+  const hasValidUrl = card.source_url && card.source_type === 'link';
 
   return (
     <div
@@ -1407,51 +1491,6 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
   );
 }
 
-// --- Classify content into knowledge base (fine-grained rule-based, tags come from LLM) ---
-function classifyToBase(tags: string[], content: string): string {
-  const contentLower = content.toLowerCase();
-  const tagStr = tags.join('').toLowerCase();
-  const combined = contentLower + ' ' + tagStr;
-
-  const classifiers: { keywords: string[]; base: string }[] = [
-    // Specific tools & platforms — highest priority
-    { keywords: ['claude', 'gpt', 'chatgpt', 'cursor', 'windsurf', 'copilot', 'aider', 'codeium', 'replit', 'vibe coding', 'design-to-code', 'bolt', 'lovable', 'piece', 'augment'], base: 'Vibe Coding' },
-    { keywords: ['midjourney', 'stable diffusion', 'dall-e', 'flux', 'comfyui', 'ai绘画', 'ai绘图', '生成图像'], base: 'AIGC' },
-    { keywords: ['notion', 'obsidian', 'logseq', 'roam', 'flomo', '知识管理', '笔记工具', '笔记方法'], base: '知识管理' },
-    { keywords: ['figma', 'sketch', 'adobe', 'canva', '视觉设计', '品牌设计', 'ui设计', 'ux设计', '字体', '配色', 'icon', '图标设计'], base: '品牌设计' },
-    { keywords: ['医疗', '健康', '药品', '医药', '诊疗', '医生', '医院', '健康管理'], base: '医疗健康' },
-    { keywords: ['小红书', '抖音', 'b站', 'bilibili', '视频号', '快手', 'tiktok'], base: '内容平台' },
-
-    // AIGC
-    { keywords: ['aigc', '生成式ai', 'genai', '大模型', 'llm', 'ai生成', 'ai创作', '人工智能', 'ai工具', 'ai助手', 'ai写作', 'ai图片', 'ai视频', 'ai语音'], base: 'AIGC' },
-
-    // Operations
-    { keywords: ['运营', '引流', '私域', '增长', '用户增长', '裂变', '推广', '获客', '转化', '复购', '社群', '微信', '投放', '广告', '投放', '电商运营', '直播运营', '内容运营'], base: '运营灵感' },
-
-    // Writing & content creation
-    { keywords: ['写作', '创作', '文案', '内容创作', '爆款', '选题', '标题', '脚本', '短视频', '种草', '内容营销', '内容方法'], base: '内容方法论' },
-
-    // Product & business
-    { keywords: ['产品经理', '产品设计', '产品策略', 'pm', 'prd', '需求', '功能', '商业模式', '盈利模式', '商业分析', '行业分析', '市场分析', '竞品分析', '战略', '公司分析'], base: '产品/商业观察' },
-  ];
-
-  let bestBase = '其他';
-  let bestScore = 0;
-
-  for (const { keywords, base } of classifiers) {
-    let score = 0;
-    for (const kw of keywords) {
-      if (combined.includes(kw)) score++;
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestBase = base;
-    }
-  }
-
-  return bestBase;
-}
-
 // --- Card Detail Modal ---
 function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () => void }) {
   const kbColor = getKnowledgeBaseColor(card.knowledge_base);
@@ -1576,14 +1615,28 @@ function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () =
             </div>
           )}
 
-          {/* Original Text */}
-          {card.original_text && (
+          {/* Extracted Text — only for non-link cards; link cards have messy raw content not worth showing */}
+          {card.original_text && card.source_type !== 'link' && (
             <div>
-              <h3 className="text-sm font-medium mb-2" style={{ color: '#8A9199' }}>原始文本</h3>
-              <div
-                className="text-sm leading-relaxed whitespace-pre-wrap rounded-xl p-4 overflow-auto max-h-64"
-                style={{ backgroundColor: '#F7F8F6', color: '#42423A', border: '1px solid #DFE2DE' }}
+              <button
+                onClick={() => {
+                  const el = document.getElementById(`extracted-text-${card.id}`);
+                  if (el) el.classList.toggle('hidden');
+                }}
+                className="text-sm font-medium mb-2 flex items-center gap-1 transition-colors"
+                style={{ color: '#8A9199' }}
+                onMouseOver={(e) => e.currentTarget.style.color = '#5A5F58'}
+                onMouseOut={(e) => e.currentTarget.style.color = '#8A9199'}
               >
+                <span>提取文本</span>
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              <div
+                id={`extracted-text-${card.id}`}
+                className="hidden text-sm leading-relaxed whitespace-pre-wrap rounded-xl p-4 overflow-auto max-h-64"
+                style={{ backgroundColor: '#F7F8F6', color: '#42423A', border: '1px solid #DFE2DE' }}>
                 {card.original_text}
               </div>
             </div>

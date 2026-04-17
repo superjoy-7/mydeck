@@ -1,4 +1,5 @@
 import { KnowledgeCard, KnowledgeBase, generateId } from './types';
+import { BASE_PALETTES, FALLBACK_PALETTE, DYNAMIC_BASE_COLORS } from './classify';
 
 const CARDS_KEY = 'ko_cards';
 const SESSIONS_KEY = 'ko_sessions';
@@ -56,27 +57,6 @@ export function searchCards(query: string, baseId?: string | null): KnowledgeCar
 
 // --- Dynamic Knowledge Bases ---
 
-// Named theme palettes per knowledge base — each has a main color + light bg + tint text
-const THEME_PALETTES: Record<string, { main: string; light: string; text: string }> = {
-  'Vibe Coding':     { main: '#749AB2', light: '#EDF3F7', text: '#5A7A8A' },
-  'Claude':         { main: '#749AB2', light: '#EDF3F7', text: '#5A7A8A' },
-  'AIGC':           { main: '#5D4C68', light: '#F2EFF5', text: '#5D4C68' },
-  '品牌设计':        { main: '#5D4C68', light: '#F2EFF5', text: '#5D4C68' },
-  '医疗健康':        { main: '#769365', light: '#EDF3EB', text: '#4E6B42' },
-  '知识管理':        { main: '#749AB2', light: '#EDF3F7', text: '#5A7A8A' },
-  '内容平台':        { main: '#749AB2', light: '#EDF3F7', text: '#5A7A8A' },
-  '运营灵感':        { main: '#769365', light: '#EDF3EB', text: '#4E6B42' },
-  '内容方法论':      { main: '#749AB2', light: '#EDF3F7', text: '#5A7A8A' },
-  '产品/商业观察':   { main: '#5D4C68', light: '#F2EFF5', text: '#5D4C68' },
-  '其他':           { main: '#42423A', light: '#F0F1F0', text: '#42423A' },
-};
-
-const FALLBACK_PALETTE = { main: '#769365', light: '#EDF3EB', text: '#4E6B42' };
-const BASE_COLORS = [
-  '#769365', '#749AB2', '#C6D6E5', '#5D4C68',
-  '#8A9199', '#A8BCCC', '#5DA29D', '#C77DBA'
-];
-
 export function getDynamicKnowledgeBases(): KnowledgeBase[] {
   const cards = loadCards();
   const baseMap = new Map<string, { name: string; count: number }>();
@@ -86,17 +66,18 @@ export function getDynamicKnowledgeBases(): KnowledgeBase[] {
     if (existing) {
       existing.count++;
     } else {
-      const name = (card.knowledge_base && card.knowledge_base !== '其他')
-        ? card.knowledge_base
-        : (card.tags[0] || card.knowledge_base);
-      baseMap.set(card.knowledge_base, { name, count: 1 });
+      baseMap.set(card.knowledge_base, { name: card.knowledge_base, count: 1 });
     }
   });
 
   const bases: KnowledgeBase[] = [];
   let colorIndex = 0;
   baseMap.forEach((value, id) => {
-    const palette = THEME_PALETTES[id] ?? { main: BASE_COLORS[colorIndex % BASE_COLORS.length], light: '#EFF6FF', text: '#2563EB' };
+    const palette = BASE_PALETTES[id] ?? {
+      main: DYNAMIC_BASE_COLORS[colorIndex % DYNAMIC_BASE_COLORS.length],
+      light: '#EFF6FF',
+      text: '#2563EB',
+    };
     bases.push({ id, name: value.name, color: palette.main });
     colorIndex++;
   });
@@ -122,7 +103,7 @@ export function getKnowledgeBaseColor(baseId: string): string {
 
 // Returns { main, light, text } for a given knowledge base id
 export function getKnowledgeBasePalette(baseId: string): { main: string; light: string; text: string } {
-  return THEME_PALETTES[baseId] ?? FALLBACK_PALETTE;
+  return BASE_PALETTES[baseId] ?? FALLBACK_PALETTE;
 }
 
 // --- Sessions Storage ---

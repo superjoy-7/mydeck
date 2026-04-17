@@ -73,7 +73,7 @@ function cleanCardForExport(card: KnowledgeCard): KnowledgeCard {
     title: card.title ?? '',
     source_url: card.source_url ?? '',
     source_type: card.source_type ?? 'text',
-    original_text: card.original_text ?? '',
+    original_text: card.source_type === 'link' ? '' : (card.original_text ?? ''),
     summary: card.summary ?? '',
     key_points: Array.isArray(card.key_points) ? card.key_points : [],
     actionable_tips: Array.isArray(card.actionable_tips) ? card.actionable_tips : [],
