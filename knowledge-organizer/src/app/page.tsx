@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
-import { loadCards, getCardsByBase, searchCards, deleteCard, getDynamicKnowledgeBases, getKnowledgeBaseName, getKnowledgeBaseColor, getKnowledgeBasePalette, loadSessions, saveSessions } from '@/lib/data';
+import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById } from '@/lib/data';
 import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, extractLinkContent, CardReference } from '@/lib/llm';
 import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
@@ -31,8 +31,42 @@ export default function Home() {
   const [imageError, setImageError] = useState<string | null>(null);
   const MAX_IMAGES = 9;
 
+  // Derived: palette map for all bases — computed once from knowledgeBases state
+  const basePaletteMap = useMemo(() => {
+    const map: Record<string, { main: string; light: string; text: string }> = {};
+    for (const kb of knowledgeBases) {
+      map[kb.id] = kb.palette;
+    }
+    return map;
+  }, [knowledgeBases]);
+
   // Derived: current knowledge base color (for header decoration)
-  const kbColor = selectedBaseId !== 'all' ? getKnowledgeBaseColor(selectedBaseId) : '#769365';
+  const kbColor = selectedBaseId !== 'all' ? (basePaletteMap[selectedBaseId]?.main ?? '#769365') : '#769365';
+
+  // Derived: full base info map (name + palette) from knowledgeBases state
+  const baseInfoMap = useMemo(() => {
+    const map: Record<string, { name: string; palette: { main: string; light: string; text: string } }> = {};
+    for (const kb of knowledgeBases) {
+      map[kb.id] = { name: kb.name, palette: kb.palette };
+    }
+    return map;
+  }, [knowledgeBases]);
+
+  // Manual classification state
+  // Base selector for the import section — '' means AI auto-decide
+  const [importBaseId, setImportBaseId] = useState<string>('');
+  const [showImportBaseSettings, setShowImportBaseSettings] = useState(false);
+  const [showCreateBase, setShowCreateBase] = useState(false);
+  const [createBaseInput, setCreateBaseInput] = useState('');
+  // Card detail — category edit
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [editingBaseId, setEditingBaseId] = useState<string>('');
+
+  // Delete base modal
+  const [deletingBase, setDeletingBase] = useState<{ id: string; name: string } | null>(null);
+
+  // Hover state for sidebar items
+  const [hoveredBaseId, setHoveredBaseId] = useState<string | null>(null);
 
   // Chat sessions
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -57,7 +91,7 @@ export default function Home() {
     setMounted(true);
     const loadedCards = loadCards();
     setCards(loadedCards);
-    setKnowledgeBases(getDynamicKnowledgeBases());
+    setKnowledgeBases(getAllBases());
 
     // Load sessions
     const loadedSessions = loadSessions();
@@ -84,9 +118,16 @@ export default function Home() {
   // Update cards and knowledge bases when selection changes
   useEffect(() => {
     if (!mounted) return;
-    setCards(getCardsByBase(selectedBaseId === 'all' ? null : selectedBaseId));
-    setKnowledgeBases(getDynamicKnowledgeBases());
-  }, [selectedBaseId, mounted]);
+    // Reload all cards from localStorage on mount
+    setCards(loadCards());
+    setKnowledgeBases(getAllBases());
+  }, [mounted]);
+
+  // Derived: visible cards filtered by selected base — does NOT mutate cards state
+  const visibleCards = useMemo(() => {
+    if (selectedBaseId === 'all') return cards;
+    return cards.filter(c => c.knowledgeBaseId === selectedBaseId);
+  }, [cards, selectedBaseId]);
 
   // Scroll to bottom of chat
   useEffect(() => {
@@ -237,9 +278,12 @@ export default function Home() {
       let finalUrl = url;
       let finalContent = content;
 
+      // Collect existing base names for AI context — prioritize reuse
+      const existingBases = getAllBaseNames();
+
       if (hasImages) {
         // Image understanding — process first image, include text as context
-        const result = await understandImage(imageUploads[0].base64, content || undefined);
+        const result = await understandImage(imageUploads[0].base64, content || undefined, existingBases);
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
@@ -279,7 +323,7 @@ export default function Home() {
         setError('正在生成知识卡片，请稍候...');
         await new Promise(r => setTimeout(r, 50));
 
-        const result = await generateKnowledgeCard(pageTitleHint + finalContent, finalUrl);
+        const result = await generateKnowledgeCard(pageTitleHint + finalContent, finalUrl, existingBases);
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
@@ -293,7 +337,7 @@ export default function Home() {
         }
       } else {
         // Text-only
-        const result = await generateKnowledgeCard(content, url);
+        const result = await generateKnowledgeCard(content, url, existingBases);
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
@@ -305,6 +349,9 @@ export default function Home() {
       // Use LLM title if good, otherwise fallback to extractTitle
       const finalTitle = title && title !== '未命名内容' && title.length > 3 ? title : extractTitle(finalContent);
 
+      // Resolve knowledgeBaseId: explicit selection > LLM suggestion
+      const selectedBaseName = importBaseId || suggestedBase || '其他';
+      const baseForCard = knowledgeBases.find(b => b.name === selectedBaseName);
       const newCard: KnowledgeCard = {
         id: generateId(),
         title: finalTitle,
@@ -315,18 +362,17 @@ export default function Home() {
         key_points: key_points.length > 0 ? key_points : ['暂无明确的要点提炼'],
         actionable_tips: actionable_tips || [],
         tags: tags.length > 0 ? tags : ['其他'],
-        knowledge_base: suggestedBase || '其他',
+        knowledgeBaseId: baseForCard?.id ?? null,
+        knowledge_base: selectedBaseName,
         created_at: new Date().toISOString(),
       };
 
       // Save to storage
-      const existingCards = loadCards();
-      existingCards.unshift(newCard);
-      localStorage.setItem('ko_cards', JSON.stringify(existingCards));
+      addCard(newCard);
 
-      // Update UI
+      // Update UI — direct set from storage (already written)
       setCards(getCardsByBase(selectedBaseId === 'all' ? null : selectedBaseId));
-      setKnowledgeBases(getDynamicKnowledgeBases());
+      setKnowledgeBases(getAllBases());
 
       // Reset form
       setLinkInput('');
@@ -334,6 +380,8 @@ export default function Home() {
       setShowTextArea(false);
       setLinkState('idle');
       setError(null);
+      setImportBaseId('');
+      setShowImportBaseSettings(false);
       // Clean up image previews
       imageUploads.forEach(u => revokePreview(u.preview));
       setImageUploads([]);
@@ -348,8 +396,58 @@ export default function Home() {
   const handleDeleteCard = useCallback((cardId: string) => {
     deleteCard(cardId);
     setCards(prev => prev.filter(c => c.id !== cardId));
-    setKnowledgeBases(getDynamicKnowledgeBases());
+    setKnowledgeBases(getAllBases());
   }, []);
+
+  // Create a new custom knowledge base
+  const handleCreateBase = useCallback(() => {
+    const name = createBaseInput.trim();
+    if (!name) return;
+    try {
+      createKnowledgeBase(name);
+      setKnowledgeBases(getAllBases());
+      setCreateBaseInput('');
+      setShowCreateBase(false);
+    } catch (err) {
+      // silently ignore duplicate/empty
+    }
+  }, [createBaseInput]);
+
+  // Update a card's knowledge base from the detail modal (by base id)
+  const handleCardBaseChange = useCallback((cardId: string, newBaseId: string | null) => {
+    const updated = moveCardToKnowledgeBase(cardId, newBaseId);
+    if (!updated) return;
+    setCards(prev => prev.map(c => c.id === cardId ? updated : c));
+    setKnowledgeBases(getAllBases());
+    setSelectedCard(updated);
+    setEditingCardId(null);
+  }, []);
+
+  // Create a new base from within the card detail modal and move the card to it
+  const handleCreateBaseFromModal = useCallback((baseName: string) => {
+    const cardId = selectedCard?.id;
+    if (!cardId) return;
+    const newBase = createKnowledgeBaseAndMoveCard(cardId, baseName);
+    if (!newBase) return;
+    const updated = loadCards().find(c => c.id === cardId) ?? null;
+    setCards(prev => prev.map(c => c.id === cardId ? { ...c, knowledgeBaseId: newBase.id, knowledge_base: newBase.name } : c));
+    setKnowledgeBases(getAllBases());
+    setSelectedCard(updated ? { ...updated } : null);
+    setEditingCardId(null);
+  }, [selectedCard]);
+
+  // Delete a knowledge base (cards are preserved with knowledgeBaseId = null)
+  const handleDeleteBase = useCallback((baseId: string, baseName: string) => {
+    deleteKnowledgeBase(baseId);
+    if (selectedBaseId === baseId) {
+      setSelectedBaseId('all');
+    }
+    // Clear knowledgeBaseId on affected cards (no re-read needed)
+    setCards(prev => prev.map(c =>
+      c.knowledgeBaseId === baseId ? { ...c, knowledgeBaseId: null } : c
+    ));
+    setKnowledgeBases(getAllBases());
+  }, [selectedBaseId]);
 
   // Chat functions
   const createNewSession = () => {
@@ -478,8 +576,20 @@ export default function Home() {
     });
   };
 
-  const getTotalCardCount = () => mounted ? loadCards().length : 0;
-  const getBaseCardCount = (baseId: string) => mounted ? loadCards().filter(c => c.knowledge_base === baseId).length : 0;
+  // Compute once: { [baseId]: count } + '__total__'
+  // Derived from React state `cards` which is always the full card set.
+  // selectedBaseId changes filter cards into visibleCards but do NOT change cards state.
+  const allCardCountMap = useMemo(() => {
+    const map: Record<string, number> = { __total__: cards.length };
+    for (const c of cards) {
+      const kbId = c.knowledgeBaseId ?? c.knowledge_base;
+      map[kbId] = (map[kbId] ?? 0) + 1;
+    }
+    return map;
+  }, [cards]);
+
+  const getTotalCardCount = () => allCardCountMap.__total__;
+  const getBaseCardCount = (baseId: string) => allCardCountMap[baseId] ?? 0;
 
   // Derive a session name from the first user message — lightweight local logic
   const deriveSessionName = (content: string): string => {
@@ -499,7 +609,7 @@ export default function Home() {
 
   const getScopeLabel = (scope: string | null) => {
     if (!scope || scope === 'all') return '全部卡片';
-    return getKnowledgeBaseName(scope) || scope;
+    return baseInfoMap[scope]?.name || scope;
   };
 
   // Before mounted, render stable placeholder
@@ -624,25 +734,27 @@ export default function Home() {
           )}
 
           {knowledgeBases.map((kb) => (
-            <button
+            <div
               key={kb.id}
-              onClick={() => setSelectedBaseId(kb.id)}
-              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all"
+              className="relative flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all cursor-pointer"
               style={
                 selectedBaseId === kb.id
                   ? { backgroundColor: '#EDF3F7', color: '#42423A' }
                   : { color: '#42423A' }
               }
+              onClick={() => setSelectedBaseId(kb.id)}
+              onMouseEnter={() => setHoveredBaseId(kb.id)}
+              onMouseLeave={() => setHoveredBaseId(null)}
             >
               <span className="flex items-center gap-2">
                 <span
                   className="w-2.5 h-2.5 rounded-full"
-                  style={{ backgroundColor: kb.color }}
+                  style={{ backgroundColor: kb.palette.main }}
                 />
                 <span className="truncate">{kb.name}</span>
               </span>
               <span
-                className="text-xs px-2 py-0.5 rounded-full"
+                className="text-xs px-2 py-0.5 rounded-full flex items-center gap-1"
                 style={
                   selectedBaseId === kb.id
                     ? { backgroundColor: '#769365', color: 'white' }
@@ -651,7 +763,23 @@ export default function Home() {
               >
                 {getBaseCardCount(kb.id)}
               </span>
-            </button>
+
+              {/* Delete button — only shown on hover */}
+              {hoveredBaseId === kb.id && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setDeletingBase({ id: kb.id, name: kb.name }); }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg opacity-60 hover:opacity-100 transition-opacity"
+                  style={{ backgroundColor: '#F5F5F5', color: '#8A9199' }}
+                  title="删除知识库"
+                  onMouseOver={e => { e.currentTarget.style.backgroundColor = '#FEF2F2'; e.currentTarget.style.color = '#DC2626'; }}
+                  onMouseOut={e => { e.currentTarget.style.backgroundColor = '#F5F5F5'; e.currentTarget.style.color = '#8A9199'; }}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
+            </div>
           ))}
 
           {knowledgeBases.length === 0 && (
@@ -660,6 +788,60 @@ export default function Home() {
                 导入内容后<br />自动生成分类
               </p>
             </div>
+          )}
+
+          {/* Create base input — shown inline */}
+          {showCreateBase ? (
+            <div className="px-2 pt-1">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={createBaseInput}
+                  onChange={e => setCreateBaseInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleCreateBase();
+                    if (e.key === 'Escape') { setShowCreateBase(false); setCreateBaseInput(''); }
+                  }}
+                  placeholder="分类名称..."
+                  autoFocus
+                  className="flex-1 px-2.5 py-1.5 rounded-lg border text-xs outline-none"
+                  style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6', color: '#42423A' }}
+                />
+                <button
+                  onClick={handleCreateBase}
+                  className="p-1.5 rounded-lg"
+                  style={{ backgroundColor: '#769365', color: 'white' }}
+                  title="保存"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => { setShowCreateBase(false); setCreateBaseInput(''); }}
+                  className="p-1.5 rounded-lg"
+                  style={{ backgroundColor: '#F0F1F0', color: '#8A9199' }}
+                  title="取消"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowCreateBase(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs transition-colors"
+              style={{ color: '#8A9199' }}
+              onMouseOver={e => e.currentTarget.style.backgroundColor = '#F0F1F0'}
+              onMouseOut={e => e.currentTarget.style.backgroundColor = 'transparent'}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              新建分类
+            </button>
           )}
         </nav>
 
@@ -785,7 +967,7 @@ export default function Home() {
 
                   // Reload UI state
                   setCards(loadCards());
-                  setKnowledgeBases(getDynamicKnowledgeBases());
+                  setKnowledgeBases(getAllBases());
                   const sessions = loadSessions();
                   setSessions(sessions);
                   setActiveSessionId(sessions[0]?.id ?? null);
@@ -827,11 +1009,11 @@ export default function Home() {
                   <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: kbColor }} />
                 )}
                 <h2 className="text-lg font-semibold" style={{ color: '#42423A' }}>
-                  {selectedBaseId === 'all' ? '全部知识卡片' : getKnowledgeBaseName(selectedBaseId)}
+                  {selectedBaseId === 'all' ? '全部知识卡片' : (baseInfoMap[selectedBaseId]?.name ?? selectedBaseId)}
                 </h2>
               </div>
               <p className="text-sm mt-0.5" style={{ color: '#8A9199' }}>
-                {cards.length} 张卡片
+                {visibleCards.length} 张卡片
                 {selectedBaseId !== 'all' && (
                   <button
                     onClick={() => setSelectedBaseId('all')}
@@ -1048,6 +1230,37 @@ export default function Home() {
                   支持：纯文本 / 粘贴图片 / 网页链接提取正文；暂不支持：视频自动解析 / 小红书正文抓取
                 </div>
 
+                {/* Lightweight classification override — collapsed by default */}
+                {showImportBaseSettings ? (
+                  <div className="p-2 rounded-xl" style={{ backgroundColor: '#F7F8F6' }}>
+                    <div className="flex items-center gap-2">
+                      <ImportBaseDropdown
+                        bases={knowledgeBases}
+                        value={importBaseId}
+                        onChange={setImportBaseId}
+                      />
+                      <button
+                        onClick={() => { setShowImportBaseSettings(false); setImportBaseId(''); }}
+                        className="text-xs px-2 py-1.5 rounded-lg"
+                        style={{ color: '#8A9199', backgroundColor: '#F0F1F0' }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowImportBaseSettings(true)}
+                    className="flex items-center gap-1 text-xs"
+                    style={{ color: '#769365' }}
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
+                    手动指定分类
+                  </button>
+                )}
+
                 {/* Process Button */}
                 <button
                   onClick={handleProcess}
@@ -1128,10 +1341,11 @@ export default function Home() {
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {cards.map((card) => (
+                {visibleCards.map((card) => (
                   <KnowledgeCardComponent
                     key={card.id}
                     card={card}
+                    knowledgeBases={knowledgeBases}
                     onDelete={handleDeleteCard}
                     onViewDetail={setSelectedCard}
                   />
@@ -1167,7 +1381,7 @@ export default function Home() {
           <div className="flex-1 flex flex-col items-center gap-1 overflow-y-auto py-1">
             {sessions.map(session => {
                 const scopeLabel = session.scope && session.scope !== 'all'
-                  ? (getKnowledgeBaseName(session.scope) || session.scope)
+                  ? (baseInfoMap[session.scope!]?.name || session.scope)
                   : '全部';
                 return (
               <button
@@ -1275,6 +1489,7 @@ export default function Home() {
                       key={session.id}
                       session={session}
                       isActive={session.id === activeSessionId}
+                      baseInfoMap={baseInfoMap}
                       onSelect={() => switchSession(session.id)}
                       onDelete={() => deleteSession(session.id)}
                     />
@@ -1389,18 +1604,81 @@ export default function Home() {
         <CardDetailModal
           card={selectedCard}
           onClose={() => setSelectedCard(null)}
+          knowledgeBases={knowledgeBases}
+          onBaseChange={handleCardBaseChange}
+          onCreateBase={handleCreateBaseFromModal}
         />
+      )}
+
+      {/* Delete Knowledge Base Confirmation Modal */}
+      {deletingBase && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={() => setDeletingBase(null)}
+        >
+          <div className="absolute inset-0" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} />
+          <div
+            className="relative w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden p-6"
+            style={{ backgroundColor: 'white' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Title */}
+            <h3 className="text-center font-semibold text-lg mb-4" style={{ color: '#42423A' }}>
+              删除知识库「{deletingBase.name}」
+            </h3>
+
+            {/* Risk description */}
+            <div className="mb-4 p-3.5 rounded-xl border" style={{ borderColor: '#DFE2DE', backgroundColor: '#FAFAF8' }}>
+              <p className="text-sm leading-relaxed" style={{ color: '#6B7280' }}>
+                删除后，该知识库下的<strong style={{ color: '#42423A' }}>所有知识卡片</strong>也将一并删除，且此操作<strong style={{ color: '#42423A' }}>不可撤销</strong>。
+              </p>
+            </div>
+
+            {/* Backup hint */}
+            <p className="text-xs text-center mb-5" style={{ color: '#9CA3AF' }}>
+              如有需要，请先导出备份
+            </p>
+
+            {/* Actions */}
+            <div className="flex gap-2.5">
+              <button
+                onClick={() => setDeletingBase(null)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium border transition-colors"
+                style={{ borderColor: '#DFE2DE', color: '#6B7280', backgroundColor: '#FAFAF8' }}
+                onMouseOver={e => e.currentTarget.style.backgroundColor = '#F5F5F5'}
+                onMouseOut={e => e.currentTarget.style.backgroundColor = '#FAFAF8'}
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  handleDeleteBase(deletingBase.id, deletingBase.name);
+                  setDeletingBase(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium text-white transition-colors"
+                style={{ backgroundColor: '#8B4E1E' }}
+                onMouseOver={e => e.currentTarget.style.backgroundColor = '#6B3D15'}
+                onMouseOut={e => e.currentTarget.style.backgroundColor = '#8B4E1E'}
+              >
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
 // --- Knowledge Card Component with Delete & Detail ---
-function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: KnowledgeCard; onDelete: (id: string) => void; onViewDetail: (card: KnowledgeCard) => void }) {
+function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }: { card: KnowledgeCard; knowledgeBases: KnowledgeBase[]; onDelete: (id: string) => void; onViewDetail: (card: KnowledgeCard) => void }) {
   const [showDelete, setShowDelete] = useState(false);
-  const kbColor = getKnowledgeBaseColor(card.knowledge_base);
-  const kbName = getKnowledgeBaseName(card.knowledge_base);
-  const kbPalette = getKnowledgeBasePalette(card.knowledge_base);
+  // Derive base info from passed-in knowledgeBases instead of calling loadAllBases()
+  const cardBaseInfo = useMemo(() => {
+    const found = knowledgeBases.find(kb => kb.id === card.knowledge_base);
+    if (found) return { name: found.name, palette: found.palette };
+    return { name: card.knowledge_base, palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
+  }, [knowledgeBases, card.knowledge_base]);
   const hasValidUrl = card.source_url && card.source_type === 'link';
 
   return (
@@ -1418,12 +1696,12 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
               {card.title}
             </h4>
             <div className="flex items-center gap-2 mt-2 flex-wrap">
-              {kbName && (
+              {cardBaseInfo.name && (
                 <span
                   className="text-xs px-2 py-0.5 rounded-full text-white"
-                  style={{ backgroundColor: kbColor }}
+                  style={{ backgroundColor: cardBaseInfo.palette.main }}
                 >
-                  {kbName}
+                  {cardBaseInfo.name}
                 </span>
               )}
               <span className="text-xs" style={{ color: '#8A9199' }}>
@@ -1494,7 +1772,7 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
           <div className="space-y-2">
             {card.key_points.slice(0, 3).map((point, i) => (
               <div key={i} className="flex items-start gap-2">
-                <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: kbPalette.main }} />
+                <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: cardBaseInfo.palette.main }} />
                 <span className="text-sm line-clamp-1" style={{ color: '#42423A' }}>{point}</span>
               </div>
             ))}
@@ -1522,8 +1800,8 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
       {/* Actionable Tips */}
       {card.actionable_tips.length > 0 && (
         <div className="px-5 pb-5">
-          <div className="rounded-xl p-3" style={{ backgroundColor: kbPalette.light }}>
-            <p className="text-xs font-medium flex items-center gap-1 mb-1" style={{ color: kbPalette.text }}>
+          <div className="rounded-xl p-3" style={{ backgroundColor: cardBaseInfo.palette.light }}>
+            <p className="text-xs font-medium flex items-center gap-1 mb-1" style={{ color: cardBaseInfo.palette.text }}>
               <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
@@ -1537,11 +1815,198 @@ function KnowledgeCardComponent({ card, onDelete, onViewDetail }: { card: Knowle
   );
 }
 
+// --- Import Base Dropdown (custom select matching MyDeck design) ---
+function ImportBaseDropdown({
+  bases,
+  value,
+  onChange,
+}: {
+  bases: KnowledgeBase[];
+  value: string; // '' means AI auto
+  onChange: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const dropRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (dropRef.current && !dropRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const filtered = bases.filter(kb =>
+    kb.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const selectedBase = bases.find(kb => kb.name === value);
+
+  return (
+    <div ref={dropRef} className="relative flex-1">
+      {/* Trigger */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border text-xs text-left transition-all"
+        style={{
+          borderColor: open ? '#769365' : '#DFE2DE',
+          backgroundColor: 'white',
+          color: selectedBase ? '#42423A' : '#8A9199',
+          boxShadow: open ? '0 0 0 2px #EDF3EB' : 'none',
+        }}
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          {selectedBase ? (
+            <>
+              <span
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ backgroundColor: selectedBase.palette.main }}
+              />
+              <span className="truncate">{selectedBase.name}</span>
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              </svg>
+              <span>自动分类（AI推荐）</span>
+            </>
+          )}
+        </span>
+        <svg
+          className="w-3.5 h-3.5 flex-shrink-0 transition-transform"
+          style={{ transform: open ? 'rotate(180deg)' : 'rotate(0deg)', color: '#8A9199' }}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div
+          className="absolute top-full left-0 right-0 mt-1.5 rounded-xl border shadow-lg z-20 overflow-hidden"
+          style={{ borderColor: '#DFE2DE', backgroundColor: 'white' }}
+        >
+          {/* Search */}
+          {bases.length > 5 && (
+            <div className="p-2 border-b" style={{ borderColor: '#EFF0EE' }}>
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="搜索分类..."
+                autoFocus
+                className="w-full px-2.5 py-1.5 rounded-lg border text-xs outline-none"
+                style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6', color: '#42423A' }}
+                onClick={e => e.stopPropagation()}
+              />
+            </div>
+          )}
+
+          {/* Option list */}
+          <div className="max-h-48 overflow-y-auto py-1">
+            {/* AI auto option */}
+            <button
+              type="button"
+              onClick={() => { onChange(''); setOpen(false); setSearch(''); }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left transition-colors"
+              style={{
+                backgroundColor: value === '' ? '#EDF3EB' : 'transparent',
+                color: value === '' ? '#4E6B42' : '#42423A',
+              }}
+              onMouseOver={e => { if (value !== '') e.currentTarget.style.backgroundColor = '#F7F8F6'; }}
+              onMouseOut={e => { if (value !== '') e.currentTarget.style.backgroundColor = 'transparent'; }}
+            >
+              <svg className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              </svg>
+              <span>自动分类（AI推荐）</span>
+              {value === '' && (
+                <svg className="w-3 h-3 ml-auto" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </button>
+
+            {/* Divider */}
+            {bases.length > 0 && <div className="my-1 border-t" style={{ borderColor: '#EFF0EE' }} />}
+
+            {/* Base options */}
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs" style={{ color: '#8A9199' }}>无匹配分类</div>
+            ) : (
+              filtered.map(kb => (
+                <button
+                  type="button"
+                  key={kb.id}
+                  onClick={() => { onChange(kb.name); setOpen(false); setSearch(''); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left transition-colors"
+                  style={{
+                    backgroundColor: value === kb.name ? '#EDF3EB' : 'transparent',
+                    color: value === kb.name ? '#4E6B42' : '#42423A',
+                  }}
+                  onMouseOver={e => { if (value !== kb.name) e.currentTarget.style.backgroundColor = '#F7F8F6'; }}
+                  onMouseOut={e => { if (value !== kb.name) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: kb.palette.main }}
+                  />
+                  <span className="truncate">{kb.name}</span>
+                  {value === kb.name && (
+                    <svg className="w-3 h-3 ml-auto flex-shrink-0" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Card Detail Modal ---
-function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () => void }) {
-  const kbColor = getKnowledgeBaseColor(card.knowledge_base);
-  const kbName = getKnowledgeBaseName(card.knowledge_base);
-  const kbPalette = getKnowledgeBasePalette(card.knowledge_base);
+function CardDetailModal({
+  card,
+  onClose,
+  knowledgeBases,
+  onBaseChange,
+  onCreateBase,
+}: {
+  card: KnowledgeCard;
+  onClose: () => void;
+  knowledgeBases: KnowledgeBase[];
+  onBaseChange: (cardId: string, baseId: string | null) => void;
+  onCreateBase: (baseName: string) => void;
+}) {
+  const modalBaseInfoMap = useMemo(() => {
+    const map: Record<string, { name: string; palette: { main: string; light: string; text: string } }> = {};
+    for (const kb of knowledgeBases) {
+      map[kb.id] = { name: kb.name, palette: kb.palette };
+    }
+    return map;
+  }, [knowledgeBases]);
+
+  const kbInfo = modalBaseInfoMap[card.knowledge_base] ?? { name: card.knowledge_base, palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
+  const [showBaseDropdown, setShowBaseDropdown] = useState(false);
+  const [baseSearch, setBaseSearch] = useState('');
+  const [showNewBaseInput, setShowNewBaseInput] = useState(false);
+  const [newBaseName, setNewBaseName] = useState('');
+
+  const filteredBases = knowledgeBases.filter(kb =>
+    kb.name.toLowerCase().includes(baseSearch.toLowerCase())
+  );
 
   return (
     <div
@@ -1562,14 +2027,131 @@ function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () =
           <div className="flex-1 min-w-0 pr-4">
             <h2 className="text-lg font-semibold" style={{ color: '#42423A' }}>{card.title}</h2>
             <div className="flex items-center gap-2 mt-2 flex-wrap">
-              {kbName && (
-                <span
-                  className="text-xs px-2 py-0.5 rounded-full text-white"
-                  style={{ backgroundColor: kbColor }}
+              {/* Category badge — clickable dropdown */}
+              <div className="relative">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowBaseDropdown(prev => !prev); setBaseSearch(''); }}
+                  className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full text-white transition-opacity"
+                  style={{ backgroundColor: kbInfo.palette.main }}
+                  title="点击修改分类"
                 >
-                  {kbName}
-                </span>
-              )}
+                  {kbInfo.name}
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {/* Dropdown */}
+                {showBaseDropdown && (
+                  <div
+                    className="absolute top-full left-0 mt-1.5 w-48 rounded-xl shadow-lg border overflow-hidden z-10"
+                    style={{ backgroundColor: 'white', borderColor: '#DFE2DE' }}
+                    onClick={e => e.stopPropagation()}
+                    onMouseLeave={() => setShowBaseDropdown(false)}
+                  >
+                    <div className="p-2 border-b" style={{ borderColor: '#DFE2DE' }}>
+                      <input
+                        type="text"
+                        value={baseSearch}
+                        onChange={e => setBaseSearch(e.target.value)}
+                        placeholder="搜索分类..."
+                        autoFocus
+                        className="w-full px-2.5 py-1.5 rounded-lg border text-xs outline-none"
+                        style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6', color: '#42423A' }}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    </div>
+                    <div className="max-h-48 overflow-y-auto py-1">
+                      {filteredBases.length === 0 && !showNewBaseInput && (
+                        <div className="px-3 py-2 text-xs" style={{ color: '#8A9199' }}>无匹配分类</div>
+                      )}
+                      {filteredBases.map(kb => (
+                        <button
+                          key={kb.id}
+                          onClick={() => {
+                            onBaseChange(card.id, kb.id);
+                            setShowBaseDropdown(false);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-colors"
+                          style={{
+                            backgroundColor: kb.name === kbInfo.name ? '#EDF3EB' : 'transparent',
+                            color: '#42423A',
+                          }}
+                          onMouseOver={e => { if (kb.name !== kbInfo.name) e.currentTarget.style.backgroundColor = '#F7F8F6'; }}
+                          onMouseOut={e => { if (kb.name !== kbInfo.name) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                        >
+                          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: kb.palette.main }} />
+                          <span className="truncate">{kb.name}</span>
+                          {kb.name === kbInfo.name && (
+                            <svg className="w-3 h-3 ml-auto flex-shrink-0" style={{ color: '#769365' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </button>
+                      ))}
+
+                      {/* Inline create new base */}
+                      {showNewBaseInput ? (
+                        <div className="px-2 py-1.5">
+                          <div className="flex gap-1">
+                            <input
+                              type="text"
+                              value={newBaseName}
+                              onChange={e => setNewBaseName(e.target.value)}
+                              placeholder="分类名称..."
+                              autoFocus
+                              className="flex-1 px-2 py-1 rounded border text-xs outline-none"
+                              style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6', color: '#42423A' }}
+                              onClick={e => e.stopPropagation()}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && newBaseName.trim()) {
+                                  onCreateBase(newBaseName.trim());
+                                  setShowNewBaseInput(false);
+                                  setNewBaseName('');
+                                }
+                                if (e.key === 'Escape') {
+                                  setShowNewBaseInput(false);
+                                  setNewBaseName('');
+                                }
+                              }}
+                            />
+                            <button
+                              onClick={() => {
+                                if (newBaseName.trim()) {
+                                  onCreateBase(newBaseName.trim());
+                                  setShowNewBaseInput(false);
+                                  setNewBaseName('');
+                                }
+                              }}
+                              className="px-2 py-1 rounded text-xs text-white"
+                              style={{ backgroundColor: '#769365' }}
+                            >
+                              创建
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setShowNewBaseInput(true);
+                            setNewBaseName(baseSearch);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-colors"
+                          style={{ color: '#769365' }}
+                          onMouseOver={e => e.currentTarget.style.backgroundColor = '#F7F8F6'}
+                          onMouseOut={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                        >
+                          <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          </svg>
+                          <span>新建分类</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <span className="text-xs" style={{ color: '#8A9199' }}>
                 {new Date(card.created_at).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })}
               </span>
@@ -1605,7 +2187,7 @@ function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () =
               <div className="space-y-3">
                 {card.key_points.map((point, i) => (
                   <div key={i} className="flex items-start gap-3">
-                    <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: kbPalette.main }} />
+                    <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: kbInfo.palette.main }} />
                     <span className="text-sm leading-relaxed" style={{ color: '#42423A' }}>{point}</span>
                   </div>
                 ))}
@@ -1619,8 +2201,8 @@ function CardDetailModal({ card, onClose }: { card: KnowledgeCard; onClose: () =
               <h3 className="text-sm font-medium mb-2" style={{ color: '#8A9199' }}>可执行建议</h3>
               <div className="space-y-2">
                 {card.actionable_tips.map((tip, i) => (
-                  <div key={i} className="rounded-xl p-3" style={{ backgroundColor: kbPalette.light }}>
-                    <p className="text-sm leading-relaxed" style={{ color: kbPalette.text }}>{tip}</p>
+                  <div key={i} className="rounded-xl p-3" style={{ backgroundColor: kbInfo.palette.light }}>
+                    <p className="text-sm leading-relaxed" style={{ color: kbInfo.palette.text }}>{tip}</p>
                   </div>
                 ))}
               </div>
@@ -1765,14 +2347,15 @@ function ChatInput({ disabled, onSend }: { disabled: boolean; onSend: (text: str
 }
 
 // --- Session Tab (div wrapper + direct hover delete, no button nesting) ---
-function SessionTab({ session, isActive, onSelect, onDelete }: {
+function SessionTab({ session, isActive, baseInfoMap, onSelect, onDelete }: {
   session: ChatSession;
   isActive: boolean;
+  baseInfoMap: Record<string, { name: string; palette: { main: string; light: string; text: string } }>;
   onSelect: () => void;
   onDelete: () => void;
 }) {
   const scopeLabel = session.scope && session.scope !== 'all'
-    ? (getKnowledgeBaseName(session.scope) || session.scope)
+    ? (baseInfoMap[session.scope!]?.name || session.scope)
     : '全部';
 
   return (
@@ -1811,7 +2394,7 @@ function SessionTab({ session, isActive, onSelect, onDelete }: {
       <div
         className="text-xs truncate px-1 mt-0.5"
         style={{
-          color: isActive ? 'rgba(255,255,255,0.7)' : '#8A9199',
+          color: '#8A9199',
           maxWidth: '90px',
         }}
         title={`${session.name} · ${scopeLabel}`}

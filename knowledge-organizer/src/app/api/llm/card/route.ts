@@ -74,11 +74,21 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { content, sourceUrl } = body as { content: string; sourceUrl: string };
+  const { content, sourceUrl, existingBases } = body as { content: string; sourceUrl: string; existingBases?: string[] };
 
   if (!content) {
     return NextResponse.json({ error: 'content is required' }, { status: 400 });
   }
+
+  // Build the system prompt with existing bases as priority context
+  const existingBasesHint = existingBases && existingBases.length > 0
+    ? `\n【已有分类参考】当前已存在的分类有：${existingBases.join('、')}。请优先将内容归入这些已有分类，只有在确实没有合适匹配时才建议新分类。`
+    : '';
+
+  const systemPrompt = CARD_SYSTEM_PROMPT.replace(
+    '请以JSON格式返回，不要包含任何其他内容。',
+    `【已有分类参考】当前已存在的分类有：${existingBases && existingBases.length > 0 ? existingBases.join('、') : '（暂无）'}。请优先将内容归入这些已有分类，只有在确实没有合适匹配时才新建分类并说明理由。\n\n请以JSON格式返回，不要包含任何其他内容。`
+  );
 
   const userContent = sourceUrl
     ? `内容来源: ${sourceUrl}\n\n${content}`
@@ -88,7 +98,7 @@ export async function POST(request: NextRequest) {
     const result = await chatCompletion(
       config,
       [
-        { role: 'system', content: CARD_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
       ],
       0.5,

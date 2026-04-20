@@ -78,6 +78,7 @@ function cleanCardForExport(card: KnowledgeCard): KnowledgeCard {
     key_points: Array.isArray(card.key_points) ? card.key_points : [],
     actionable_tips: Array.isArray(card.actionable_tips) ? card.actionable_tips : [],
     tags: Array.isArray(card.tags) ? card.tags : [],
+    knowledgeBaseId: card.knowledgeBaseId ?? null,
     knowledge_base: card.knowledge_base ?? '其他',
     created_at: card.created_at ?? new Date().toISOString(),
   };

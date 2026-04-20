@@ -50,6 +50,7 @@ export function isLLMConfigured(): boolean {
 export async function generateKnowledgeCard(
   content: string,
   sourceUrl: string,
+  existingBases?: string[],
 ): Promise<{
   title: string;
   summary: string;
@@ -61,7 +62,7 @@ export async function generateKnowledgeCard(
   const response = await fetch('/api/llm/card', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, sourceUrl }),
+    body: JSON.stringify({ content, sourceUrl, existingBases }),
   });
 
   if (!response.ok) {
@@ -98,6 +99,7 @@ export async function generateChatResponse(
 export async function understandImage(
   imageBase64: string,
   text?: string,
+  existingBases?: string[],
 ): Promise<{
   title: string;
   summary: string;
@@ -109,7 +111,7 @@ export async function understandImage(
   const response = await fetch('/api/llm/vision', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageBase64, text }),
+    body: JSON.stringify({ imageBase64, text, existingBases }),
   });
 
   if (!response.ok) {

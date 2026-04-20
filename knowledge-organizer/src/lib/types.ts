@@ -8,7 +8,10 @@ export interface KnowledgeCard {
   key_points: string[];
   actionable_tips: string[];
   tags: string[];
-  knowledge_base: string; // Dynamic string, not enum
+  /** Stable ID reference to knowledge base entity */
+  knowledgeBaseId: string | null;
+  /** Legacy display field — kept for backward compatibility, synced from knowledgeBaseId */
+  knowledge_base: string;
   created_at: string;
 }
 
@@ -30,11 +33,16 @@ export interface ChatSession {
 export interface KnowledgeBase {
   id: string;
   name: string;
-  color: string;
+  /** Persisted palette */
+  palette: { main: string; light: string; text: string };
+  /** When this base was first created */
+  createdAt: string;
+  /** When this base was last updated */
+  updatedAt: string;
 }
 
 export function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  return Date.now().toString(36) + Math.random().toString(36).substring(2, 11);
 }
 
 // Extract meaningful title from text (first meaningful line)
