@@ -3,30 +3,31 @@
  *
  * Storage layout in localStorage:
  *   ko_cards     → KnowledgeCard[]
+ *   ko_bases    → KnowledgeBase[]
  *   ko_sessions → ChatSession[]
  *
- * Backup file format:
+ * Backup file format (schemaVersion 2+):
  *   {
  *     "app": "MyDeck",
  *     "version": "1.0",
- *     "schemaVersion": 1,
+ *     "schemaVersion": 2,
  *     "exportedAt": "<ISO 8601>",
  *     "data": {
  *       "cards": [...],
+ *       "bases": [...],        // schemaVersion 2+ — knowledge base entities
  *       "sessions": [...],
- *       "meta": { "cardCount": N, "sessionCount": N }
+ *       "meta": { "cardCount": N, "sessionCount": N, "baseCount": N }
  *     }
  *   }
  *
  * Import strategy: full overwrite with explicit user confirmation.
- * (Rationale: a backup is a point-in-time snapshot; merging introduces complex
- *  id-collision rules that are confusing to debug. Overwrite is deterministic
- *  and easy to reason about for a personal, single-user app.)
+ * Fallback: if bases are missing from backup, rebuild them from cards.
  */
 
-import { KnowledgeCard, ChatSession } from './types';
-import { loadCards, saveCards } from './data';
+import { KnowledgeCard, ChatSession, KnowledgeBase } from './types';
+import { loadCards, saveCards, loadAllBases, saveAllBases, getBaseById } from './data';
 import { loadSessions, saveSessions } from './data';
+import { BASE_PALETTES, FALLBACK_PALETTE, DYNAMIC_BASE_COLORS } from './classify';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,16 +36,18 @@ import { loadSessions, saveSessions } from './data';
 export interface BackupMeta {
   cardCount: number;
   sessionCount: number;
+  baseCount: number;
 }
 
 export interface BackupData {
   cards: KnowledgeCard[];
+  bases?: KnowledgeBase[];   // schemaVersion 2+
   sessions: ChatSession[];
   meta: BackupMeta;
 }
 
 export interface BackupManifest {
-  app: 'MyDeck';
+  app: string;
   version: string;
   schemaVersion: number;
   exportedAt: string;
@@ -56,7 +59,20 @@ export interface ImportResult {
   error?: string;
   warning?: string;
   restoredCards: number;
+  restoredBases: number;
   restoredSessions: number;
+}
+
+// ---------------------------------------------------------------------------
+// Color assignment — same logic as data.ts, needed here for fallback rebuild
+// ---------------------------------------------------------------------------
+
+function assignPalette(baseName: string, usedMainColors: Set<string>): { main: string; light: string; text: string } {
+  if (BASE_PALETTES[baseName]) return BASE_PALETTES[baseName];
+  for (const color of DYNAMIC_BASE_COLORS) {
+    if (!usedMainColors.has(color)) return { main: color, light: '#EFF6FF', text: '#2563EB' };
+  }
+  return FALLBACK_PALETTE;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +100,16 @@ function cleanCardForExport(card: KnowledgeCard): KnowledgeCard {
   };
 }
 
+function cleanBaseForExport(base: KnowledgeBase): KnowledgeBase {
+  return {
+    id: base.id,
+    name: base.name,
+    palette: base.palette,
+    createdAt: base.createdAt ?? new Date(0).toISOString(),
+    updatedAt: base.updatedAt ?? new Date(0).toISOString(),
+  };
+}
+
 function cleanSessionForExport(session: ChatSession): ChatSession {
   return {
     id: session.id,
@@ -107,19 +133,22 @@ function cleanSessionForExport(session: ChatSession): ChatSession {
 
 export function exportBackup(): void {
   const cards = loadCards();
+  const bases = loadAllBases();
   const sessions = loadSessions();
 
   const manifest: BackupManifest = {
     app: 'MyDeck',
     version: '1.0',
-    schemaVersion: 1,
+    schemaVersion: 2,
     exportedAt: new Date().toISOString(),
     data: {
       cards: cards.map(cleanCardForExport),
+      bases: bases.map(cleanBaseForExport),
       sessions: sessions.map(cleanSessionForExport),
       meta: {
         cardCount: cards.length,
         sessionCount: sessions.length,
+        baseCount: bases.length,
       },
     },
   };
@@ -204,42 +233,101 @@ export function validateBackupJson(raw: string): ValidateImportResult {
   }
 
   const manifest = obj as unknown as BackupManifest;
-  return { ok: true, manifest, data: manifest.data };
+  return { ok: true, manifest, data: manifest.data as BackupData };
 }
 
 // ---------------------------------------------------------------------------
-// Import (overwrite strategy)
+// Import — overwrite strategy with knowledge base rebuild fallback
 // ---------------------------------------------------------------------------
+
+/**
+ * Rebuild knowledge base entities from cards when backup has no bases.
+ * Groups cards by knowledgeBaseId (primary) or knowledge_base (legacy fallback),
+ * creates base entities with stable colors, then writes both bases and updated cards.
+ */
+function rebuildBasesFromCards(cards: KnowledgeCard[]): KnowledgeBase[] {
+  const seenNames = new Set<string>();
+  const seenColors = new Set<string>();
+  const result: KnowledgeBase[] = [];
+
+  for (const card of cards) {
+    // Prefer knowledgeBaseId -> base name, fallback to knowledge_base string
+    const baseName = card.knowledgeBaseId
+      ? (getBaseById(card.knowledgeBaseId)?.name ?? null)
+      : null;
+    const name = baseName ?? card.knowledge_base ?? '其他';
+    if (seenNames.has(name)) continue;
+    seenNames.add(name);
+
+    const palette = assignPalette(name, seenColors);
+    seenColors.add(palette.main);
+
+    result.push({
+      id: name,
+      name,
+      palette,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    });
+  }
+
+  return result;
+}
 
 export function restoreFromBackup(
   data: BackupData,
 ): ImportResult {
   try {
-    // Restore cards
+    // ---- 1. Restore cards (migrate knowledgeBaseId if missing) ----
     const validCards: KnowledgeCard[] = data.cards
       .filter(c => c && typeof c === 'object' && typeof (c as KnowledgeCard).id === 'string')
       .map(c => cleanCardForExport(c as KnowledgeCard));
 
     saveCards(validCards);
 
-    // Restore sessions
+    // ---- 2. Restore or rebuild knowledge bases ----
+    let restoredBases = 0;
+    if (data.bases && data.bases.length > 0) {
+      // Priority 1: restore explicit bases from backup
+      const validBases: KnowledgeBase[] = data.bases
+        .filter(b => b && typeof b === 'object' && typeof (b as KnowledgeBase).id === 'string')
+        .map(b => ({
+          id: (b as KnowledgeBase).id,
+          name: (b as KnowledgeBase).name ?? (b as KnowledgeBase).id,
+          palette: (b as KnowledgeBase).palette ?? FALLBACK_PALETTE,
+          createdAt: (b as KnowledgeBase).createdAt ?? new Date(0).toISOString(),
+          updatedAt: (b as KnowledgeBase).updatedAt ?? new Date(0).toISOString(),
+        }));
+      saveAllBases(validBases);
+      restoredBases = validBases.length;
+    } else {
+      // Priority 2: rebuild bases from cards (handles legacy backups + early schemaVersion 1 exports)
+      const rebuilt = rebuildBasesFromCards(validCards);
+      saveAllBases(rebuilt);
+      restoredBases = rebuilt.length;
+    }
+
+    // ---- 3. Restore sessions ----
     const validSessions: ChatSession[] = data.sessions
       .filter(s => s && typeof s === 'object' && typeof (s as ChatSession).id === 'string')
       .map(s => cleanSessionForExport(s as ChatSession));
 
     saveSessions(validSessions);
 
+    const skippedCards = data.cards.length - validCards.length;
     return {
       ok: true,
       restoredCards: validCards.length,
+      restoredBases,
       restoredSessions: validSessions.length,
-      warning:
-        validCards.length < data.cards.length
-          ? `导入了 ${validCards.length}/${data.cards.length} 张卡片（部分数据因格式问题被跳过）。`
-          : undefined,
+      warning: skippedCards > 0
+        ? `导入了 ${validCards.length}/${data.cards.length} 张卡片（部分数据因格式问题被跳过）。`
+        : restoredBases > 0 && !data.bases
+        ? `未在备份中找到知识库，已根据卡片分类自动重建了 ${restoredBases} 个知识库。`
+        : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : '未知错误';
-    return { ok: false, error: `恢复失败：${msg}`, restoredCards: 0, restoredSessions: 0 };
+    return { ok: false, error: `恢复失败：${msg}`, restoredCards: 0, restoredBases: 0, restoredSessions: 0 };
   }
 }

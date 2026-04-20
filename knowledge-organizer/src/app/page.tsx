@@ -972,7 +972,7 @@ export default function Home() {
                   setSessions(sessions);
                   setActiveSessionId(sessions[0]?.id ?? null);
 
-                  let msg = `已恢复 ${result.restoredCards} 张卡片、${result.restoredSessions} 条对话。`;
+                  let msg = `已恢复 ${result.restoredCards} 张卡片、${result.restoredBases} 个知识库、${result.restoredSessions} 条对话。`;
                   if (result.warning) msg += `\n${result.warning}`;
                   setBackupFeedback({ type: 'success', message: msg });
                   e.target.value = '';
