@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
-import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById } from '@/lib/data';
+import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById, renameKnowledgeBase } from '@/lib/data';
 import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, extractLinkContent, CardReference } from '@/lib/llm';
 import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
@@ -64,6 +64,10 @@ export default function Home() {
 
   // Delete base modal
   const [deletingBase, setDeletingBase] = useState<{ id: string; name: string } | null>(null);
+
+  // Rename base modal
+  const [renamingBase, setRenamingBase] = useState<{ id: string; name: string } | null>(null);
+  const [renameInput, setRenameInput] = useState('');
 
   // Hover state for sidebar items
   const [hoveredBaseId, setHoveredBaseId] = useState<string | null>(null);
@@ -438,16 +442,24 @@ export default function Home() {
 
   // Delete a knowledge base (cards are preserved with knowledgeBaseId = null)
   const handleDeleteBase = useCallback((baseId: string, baseName: string) => {
+    // Cascade delete: removes base AND all its cards in data.ts
     deleteKnowledgeBase(baseId);
     if (selectedBaseId === baseId) {
       setSelectedBaseId('all');
     }
-    // Clear knowledgeBaseId on affected cards (no re-read needed)
-    setCards(prev => prev.map(c =>
-      c.knowledgeBaseId === baseId ? { ...c, knowledgeBaseId: null } : c
-    ));
+    // Filter deleted cards from UI state (data.ts already persisted the removal)
+    setCards(prev => prev.filter(c => c.knowledgeBaseId !== baseId));
     setKnowledgeBases(getAllBases());
   }, [selectedBaseId]);
+
+  // Rename a knowledge base
+  const handleRenameBase = useCallback((baseId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    renameKnowledgeBase(baseId, trimmed);
+    setKnowledgeBases(getAllBases());
+    setRenamingBase(null);
+  }, []);
 
   // Chat functions
   const createNewSession = () => {
@@ -764,20 +776,36 @@ export default function Home() {
                 {getBaseCardCount(kb.id)}
               </span>
 
-              {/* Delete button — only shown on hover */}
+              {/* Action buttons — only shown on hover */}
               {hoveredBaseId === kb.id && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); setDeletingBase({ id: kb.id, name: kb.name }); }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg opacity-60 hover:opacity-100 transition-opacity"
-                  style={{ backgroundColor: '#F5F5F5', color: '#8A9199' }}
-                  title="删除知识库"
-                  onMouseOver={e => { e.currentTarget.style.backgroundColor = '#FEF2F2'; e.currentTarget.style.color = '#DC2626'; }}
-                  onMouseOut={e => { e.currentTarget.style.backgroundColor = '#F5F5F5'; e.currentTarget.style.color = '#8A9199'; }}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                  {/* Rename button */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setRenamingBase({ id: kb.id, name: kb.name }); setRenameInput(kb.name); }}
+                    className="p-1 rounded-lg opacity-60 hover:opacity-100 transition-opacity"
+                    style={{ backgroundColor: '#F5F5F5', color: '#8A9199' }}
+                    title="重命名知识库"
+                    onMouseOver={e => { e.currentTarget.style.backgroundColor = '#EDF3EB'; e.currentTarget.style.color = '#769365'; }}
+                    onMouseOut={e => { e.currentTarget.style.backgroundColor = '#F5F5F5'; e.currentTarget.style.color = '#8A9199'; }}
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </button>
+                  {/* Delete button */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setDeletingBase({ id: kb.id, name: kb.name }); }}
+                    className="p-1 rounded-lg opacity-60 hover:opacity-100 transition-opacity"
+                    style={{ backgroundColor: '#F5F5F5', color: '#8A9199' }}
+                    title="删除知识库"
+                    onMouseOver={e => { e.currentTarget.style.backgroundColor = '#FEF2F2'; e.currentTarget.style.color = '#DC2626'; }}
+                    onMouseOut={e => { e.currentTarget.style.backgroundColor = '#F5F5F5'; e.currentTarget.style.color = '#8A9199'; }}
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
               )}
             </div>
           ))}
@@ -1630,7 +1658,11 @@ export default function Home() {
             {/* Risk description */}
             <div className="mb-4 p-3.5 rounded-xl border" style={{ borderColor: '#DFE2DE', backgroundColor: '#FAFAF8' }}>
               <p className="text-sm leading-relaxed" style={{ color: '#6B7280' }}>
-                删除后，该知识库下的<strong style={{ color: '#42423A' }}>所有知识卡片</strong>也将一并删除，且此操作<strong style={{ color: '#42423A' }}>不可撤销</strong>。
+                删除后，该知识库下的
+                <strong style={{ color: '#42423A' }}>
+                  {getBaseCardCount(deletingBase.id)} 张知识卡片
+                </strong>
+                也将一并删除，且此操作<strong style={{ color: '#42423A' }}>不可撤销</strong>。
               </p>
             </div>
 
@@ -1666,6 +1698,66 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Rename Knowledge Base Modal */}
+      {renamingBase && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={() => setRenamingBase(null)}
+        >
+          <div className="absolute inset-0" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} />
+          <div
+            className="relative w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden p-6"
+            style={{ backgroundColor: 'white' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Title */}
+            <h3 className="text-center font-semibold text-lg mb-4" style={{ color: '#42423A' }}>
+              重命名知识库
+            </h3>
+
+            {/* Input */}
+            <input
+              type="text"
+              value={renameInput}
+              onChange={e => setRenameInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && renameInput.trim()) handleRenameBase(renamingBase.id, renameInput);
+                if (e.key === 'Escape') setRenamingBase(null);
+              }}
+              placeholder="输入新名称..."
+              autoFocus
+              className="w-full px-4 py-3 rounded-xl border text-sm outline-none mb-4"
+              style={{ borderColor: '#DFE2DE', backgroundColor: '#F7F8F6', color: '#42423A' }}
+            />
+
+            {/* Actions */}
+            <div className="flex gap-2.5">
+              <button
+                onClick={() => setRenamingBase(null)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium border transition-colors"
+                style={{ borderColor: '#DFE2DE', color: '#6B7280', backgroundColor: '#FAFAF8' }}
+                onMouseOver={e => e.currentTarget.style.backgroundColor = '#F5F5F5'}
+                onMouseOut={e => e.currentTarget.style.backgroundColor = '#FAFAF8'}
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  handleRenameBase(renamingBase.id, renameInput);
+                }}
+                disabled={!renameInput.trim()}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ backgroundColor: '#769365' }}
+                onMouseOver={e => { if (renameInput.trim()) e.currentTarget.style.backgroundColor = '#6a8660'; }}
+                onMouseOut={e => e.currentTarget.style.backgroundColor = '#769365'}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1673,12 +1765,16 @@ export default function Home() {
 // --- Knowledge Card Component with Delete & Detail ---
 function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }: { card: KnowledgeCard; knowledgeBases: KnowledgeBase[]; onDelete: (id: string) => void; onViewDetail: (card: KnowledgeCard) => void }) {
   const [showDelete, setShowDelete] = useState(false);
-  // Derive base info from passed-in knowledgeBases instead of calling loadAllBases()
+  // Derive base info from passed-in knowledgeBases via stable knowledgeBaseId
   const cardBaseInfo = useMemo(() => {
-    const found = knowledgeBases.find(kb => kb.id === card.knowledge_base);
+    // Primary: look up by stable knowledgeBaseId
+    const found = card.knowledgeBaseId
+      ? knowledgeBases.find(kb => kb.id === card.knowledgeBaseId)
+      : null;
     if (found) return { name: found.name, palette: found.palette };
-    return { name: card.knowledge_base, palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
-  }, [knowledgeBases, card.knowledge_base]);
+    // Fallback: orphan card with no knowledgeBaseId — use legacy field (should be rare)
+    return { name: card.knowledge_base || '其他', palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
+  }, [knowledgeBases, card.knowledgeBaseId]);
   const hasValidUrl = card.source_url && card.source_type === 'link';
 
   return (
@@ -1998,7 +2094,9 @@ function CardDetailModal({
     return map;
   }, [knowledgeBases]);
 
-  const kbInfo = modalBaseInfoMap[card.knowledge_base] ?? { name: card.knowledge_base, palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
+  const kbInfo = card.knowledgeBaseId
+    ? (modalBaseInfoMap[card.knowledgeBaseId] ?? { name: card.knowledge_base || '其他', palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } })
+    : { name: card.knowledge_base || '其他', palette: { main: '#769365', light: '#EDF3EB', text: '#4E6B42' } };
   const [showBaseDropdown, setShowBaseDropdown] = useState(false);
   const [baseSearch, setBaseSearch] = useState('');
   const [showNewBaseInput, setShowNewBaseInput] = useState(false);

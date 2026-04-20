@@ -105,19 +105,13 @@ export function deleteKnowledgeBase(baseId: string): number {
 
   saveAllBases(bases.filter(b => b.id !== baseId));
 
-  // Clear knowledgeBaseId on all cards that belonged to this base (don't delete cards)
+  // Cascade delete: remove all cards belonging to this base
   const cards = loadCards();
-  let movedCount = 0;
-  const updated = cards.map(c => {
-    if (c.knowledgeBaseId === baseId) {
-      movedCount++;
-      return { ...c, knowledgeBaseId: null };
-    }
-    return c;
-  });
-  if (movedCount > 0) saveCards(updated);
+  const remaining = cards.filter(c => c.knowledgeBaseId !== baseId);
+  const deletedCount = cards.length - remaining.length;
+  saveCards(remaining);
 
-  return movedCount;
+  return deletedCount;
 }
 
 /** Get all bases sorted by creation time (oldest first). */
