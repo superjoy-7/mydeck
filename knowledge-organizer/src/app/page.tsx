@@ -433,12 +433,14 @@ export default function Home() {
   const handleCreateBaseFromModal = useCallback((baseName: string) => {
     const cardId = selectedCard?.id;
     if (!cardId) return;
-    const newBase = createKnowledgeBaseAndMoveCard(cardId, baseName);
+    const newBase = createKnowledgeBase(baseName);
     if (!newBase) return;
-    const updated = loadCards().find(c => c.id === cardId) ?? null;
-    setCards(prev => prev.map(c => c.id === cardId ? { ...c, knowledgeBaseId: newBase.id, knowledge_base: newBase.name } : c));
+    // moveCardToKnowledgeBase returns the updated card — use it directly to refresh modal
+    const updated = moveCardToKnowledgeBase(cardId, newBase.id);
+    if (!updated) return;
+    setCards(prev => prev.map(c => c.id === cardId ? updated : c));
     setKnowledgeBases(getAllBases());
-    setSelectedCard(updated ? { ...updated } : null);
+    setSelectedCard({ ...updated });
     setEditingCardId(null);
   }, [selectedCard]);
 
@@ -1905,7 +1907,7 @@ function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }
               </svg>
               可执行建议
             </p>
-            <p className="text-xs line-clamp-2" style={{ color: '#42423A' }}>{card.actionable_tips[0]}</p>
+            <p className="text-xs line-clamp-2" style={{ color: cardBaseInfo.palette.text }}>{card.actionable_tips[0]}</p>
           </div>
         </div>
       )}

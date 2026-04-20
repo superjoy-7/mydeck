@@ -449,8 +449,14 @@ export function getCanonicalPalette(baseId: string): { main: string; light: stri
   return BASE_PALETTES[baseId] ?? FALLBACK_PALETTE;
 }
 
-// Pool of colors for dynamically created bases (that aren't in BASE_PALETTES)
-export const DYNAMIC_BASE_COLORS = [
-  '#769365', '#749AB2', '#C6D6E5', '#5D4C68',
-  '#8A9199', '#A8BCCC', '#5DA29D', '#C77DBA',
+// Pool of palettes for dynamically created bases (that aren't in BASE_PALETTES)
+export const DYNAMIC_BASE_COLORS: { main: string; light: string; text: string }[] = [
+  { main: '#769365', light: '#EDF3EB', text: '#4E6B42' },
+  { main: '#749AB2', light: '#EBF3F8', text: '#2D6A8F' },
+  { main: '#C6D6E5', light: '#EEF4F9', text: '#3A5C73' },
+  { main: '#5D4C68', light: '#F0EBF5', text: '#4A3556' },
+  { main: '#8A9199', light: '#F0F1F3', text: '#4E5760' },
+  { main: '#A8BCCC', light: '#EEF4F8', text: '#3A5A70' },
+  { main: '#5DA29D', light: '#EAF4F3', text: '#2D7670' },
+  { main: '#C77DBA', light: '#F7EBF5', text: '#8A3A80' },
 ];

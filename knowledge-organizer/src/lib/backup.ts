@@ -69,8 +69,8 @@ export interface ImportResult {
 
 function assignPalette(baseName: string, usedMainColors: Set<string>): { main: string; light: string; text: string } {
   if (BASE_PALETTES[baseName]) return BASE_PALETTES[baseName];
-  for (const color of DYNAMIC_BASE_COLORS) {
-    if (!usedMainColors.has(color)) return { main: color, light: '#EFF6FF', text: '#2563EB' };
+  for (const palette of DYNAMIC_BASE_COLORS) {
+    if (!usedMainColors.has(palette.main)) return palette;
   }
   return FALLBACK_PALETTE;
 }

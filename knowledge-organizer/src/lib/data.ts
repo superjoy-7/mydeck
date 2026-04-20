@@ -14,8 +14,8 @@ function assignPalette(baseName: string, usedMainColors: Set<string>): { main: s
   // 1. Canonical preset (by name)
   if (BASE_PALETTES[baseName]) return BASE_PALETTES[baseName];
   // 2. First unused from dynamic pool
-  for (const color of DYNAMIC_BASE_COLORS) {
-    if (!usedMainColors.has(color)) return { main: color, light: '#EFF6FF', text: '#2563EB' };
+  for (const palette of DYNAMIC_BASE_COLORS) {
+    if (!usedMainColors.has(palette.main)) return palette;
   }
   // 3. Deterministic fallback
   return FALLBACK_PALETTE;
@@ -39,11 +39,18 @@ export function loadAllBases(): KnowledgeBase[] {
         aliases: base.aliases ?? [],
         createdAt: base.createdAt || new Date(0).toISOString(),
         updatedAt: (base as KnowledgeBase).updatedAt || new Date(0).toISOString(),
-        palette: base.palette ?? (
-          legacy.color
-            ? { main: legacy.color, light: '#EFF6FF', text: '#2563EB' }
-            : FALLBACK_PALETTE
-        ),
+        palette: (() => {
+          if (!base.palette) {
+            return legacy.color
+              ? (DYNAMIC_BASE_COLORS.find(p => p.main === legacy.color) ?? FALLBACK_PALETTE)
+              : FALLBACK_PALETTE;
+          }
+          // Re-assign if saved with old buggy blue placeholder
+          if (base.palette.light === '#EFF6FF' && base.palette.text === '#2563EB') {
+            return DYNAMIC_BASE_COLORS.find(p => p.main === base.palette.main) ?? FALLBACK_PALETTE;
+          }
+          return base.palette;
+        })(),
       } satisfies KnowledgeBase;
     });
   } catch {
