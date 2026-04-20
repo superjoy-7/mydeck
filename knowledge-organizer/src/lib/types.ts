@@ -33,6 +33,8 @@ export interface ChatSession {
 export interface KnowledgeBase {
   id: string;
   name: string;
+  /** Historical names — populated when a base is renamed, enables AI alias resolution */
+  aliases: string[];
   /** Persisted palette */
   palette: { main: string; light: string; text: string };
   /** When this base was first created */

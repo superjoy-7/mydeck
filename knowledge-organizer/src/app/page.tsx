@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
-import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById, renameKnowledgeBase } from '@/lib/data';
+import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById, renameKnowledgeBase, resolveKnowledgeBaseFromAIResult } from '@/lib/data';
 import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, extractLinkContent, CardReference } from '@/lib/llm';
 import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
@@ -353,9 +353,11 @@ export default function Home() {
       // Use LLM title if good, otherwise fallback to extractTitle
       const finalTitle = title && title !== '未命名内容' && title.length > 3 ? title : extractTitle(finalContent);
 
-      // Resolve knowledgeBaseId: explicit selection > LLM suggestion
-      const selectedBaseName = importBaseId || suggestedBase || '其他';
-      const baseForCard = knowledgeBases.find(b => b.name === selectedBaseName);
+      // Resolve knowledgeBaseId: explicit selection > LLM suggestion (with alias support)
+      // Priority: user-selected base > resolve AI result (handles rename aliases)
+      const resolvedBase = importBaseId
+        ? (knowledgeBases.find(b => b.name === importBaseId) ?? null)
+        : resolveKnowledgeBaseFromAIResult(suggestedBase);
       const newCard: KnowledgeCard = {
         id: generateId(),
         title: finalTitle,
@@ -366,8 +368,8 @@ export default function Home() {
         key_points: key_points.length > 0 ? key_points : ['暂无明确的要点提炼'],
         actionable_tips: actionable_tips || [],
         tags: tags.length > 0 ? tags : ['其他'],
-        knowledgeBaseId: baseForCard?.id ?? null,
-        knowledge_base: selectedBaseName,
+        knowledgeBaseId: resolvedBase?.id ?? null,
+        knowledge_base: resolvedBase?.name ?? (suggestedBase || '其他'),
         created_at: new Date().toISOString(),
       };
 

@@ -31,11 +31,12 @@ export function loadAllBases(): KnowledgeBase[] {
   try {
     const raw: KnowledgeBase[] = JSON.parse(localStorage.getItem(BASES_KEY) || '[]');
     return raw.map(base => {
-      // Migrate legacy format (color string or missing updatedAt)
+      // Migrate legacy format (color string, missing updatedAt, missing aliases)
       const legacy = base as unknown as { color?: string };
       return {
         id: base.id,
         name: base.name,
+        aliases: base.aliases ?? [],
         createdAt: base.createdAt || new Date(0).toISOString(),
         updatedAt: (base as KnowledgeBase).updatedAt || new Date(0).toISOString(),
         palette: base.palette ?? (
@@ -73,6 +74,7 @@ export function createKnowledgeBase(name: string): KnowledgeBase {
   const newBase: KnowledgeBase = {
     id: nameTrimmed, // id == name for canonical lookup simplicity
     name: nameTrimmed,
+    aliases: [],
     palette,
     createdAt: now,
     updatedAt: now,
@@ -82,7 +84,7 @@ export function createKnowledgeBase(name: string): KnowledgeBase {
   return newBase;
 }
 
-/** Rename a knowledge base. Only the name is updated, cards are untouched. */
+/** Rename a knowledge base. Preserves old name in aliases for AI resolution. */
 export function renameKnowledgeBase(baseId: string, newName: string): void {
   const bases = loadAllBases();
   const idx = bases.findIndex(b => b.id === baseId);
@@ -93,7 +95,18 @@ export function renameKnowledgeBase(baseId: string, newName: string): void {
   // Prevent name collision
   if (bases.some(b => b.id !== baseId && b.name === trimmed)) return;
 
-  bases[idx] = { ...bases[idx], name: trimmed, updatedAt: new Date().toISOString() };
+  const oldName = bases[idx].name;
+  // Push old name to aliases so AI results matching the old name still resolve correctly
+  const aliases = oldName !== trimmed && !bases[idx].aliases.includes(oldName)
+    ? [...bases[idx].aliases, oldName]
+    : bases[idx].aliases;
+
+  bases[idx] = {
+    ...bases[idx],
+    name: trimmed,
+    aliases,
+    updatedAt: new Date().toISOString(),
+  };
   saveAllBases(bases);
 }
 
@@ -122,6 +135,52 @@ export function getAllBases(): KnowledgeBase[] {
 /** Get a single base by id. */
 export function getBaseById(baseId: string): KnowledgeBase | undefined {
   return loadAllBases().find(b => b.id === baseId);
+}
+
+/**
+ * Resolve a knowledge base from an AI-suggested category name.
+ * 1. Exact match on current name (case-insensitive)
+ * 2. Exact match on any alias (case-insensitive) — handles renamed bases
+ * 3. Canonical base name (from CANONICAL_BASES) not yet created → auto-create it
+ * Returns the matching base, or null if no match.
+ */
+export function resolveKnowledgeBaseFromAIResult(suggestedName: string): KnowledgeBase | null {
+  if (!suggestedName) return null;
+  const trimmed = suggestedName.trim();
+  if (!trimmed) return null;
+  const bases = loadAllBases();
+  const lower = trimmed.toLowerCase();
+
+  // Priority 1: exact match on current name
+  const byName = bases.find(b => b.name.toLowerCase() === lower);
+  if (byName) return byName;
+
+  // Priority 2: exact match on any alias (handles rename history)
+  for (const base of bases) {
+    if (base.aliases.some(a => a.toLowerCase() === lower)) {
+      return base;
+    }
+  }
+
+  // Priority 3: canonical base name not yet created → auto-create it
+  const canonicalNames = [
+    'AI工具', '多模型平台', 'Vibe Coding', 'AIGC',
+    '内容方法论', '内容平台',
+    '产品/商业观察', '运营灵感',
+    '知识管理', '品牌设计',
+    '医疗健康', '节假日',
+    '其他',
+  ];
+  if (canonicalNames.includes(trimmed)) {
+    try {
+      const newBase = createKnowledgeBase(trimmed);
+      return newBase;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,9 +314,14 @@ export function getBaseName(baseId: string): string {
   return base?.name || baseId;
 }
 
-/** All known base names — used for LLM context only, not for rendering. */
+/** All known base names and aliases — used for LLM context only, not for rendering. */
 export function getAllBaseNames(): string[] {
-  return loadAllBases().map(b => b.name);
+  const names = new Set<string>();
+  for (const base of loadAllBases()) {
+    names.add(base.name);
+    for (const alias of base.aliases) names.add(alias);
+  }
+  return [...names];
 }
 
 // ---------------------------------------------------------------------------

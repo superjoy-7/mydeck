@@ -104,6 +104,7 @@ function cleanBaseForExport(base: KnowledgeBase): KnowledgeBase {
   return {
     id: base.id,
     name: base.name,
+    aliases: base.aliases ?? [],
     palette: base.palette,
     createdAt: base.createdAt ?? new Date(0).toISOString(),
     updatedAt: base.updatedAt ?? new Date(0).toISOString(),
@@ -265,6 +266,7 @@ function rebuildBasesFromCards(cards: KnowledgeCard[]): KnowledgeBase[] {
     result.push({
       id: name,
       name,
+      aliases: [],
       palette,
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString(),
@@ -294,6 +296,7 @@ export function restoreFromBackup(
         .map(b => ({
           id: (b as KnowledgeBase).id,
           name: (b as KnowledgeBase).name ?? (b as KnowledgeBase).id,
+          aliases: (b as KnowledgeBase).aliases ?? [],
           palette: (b as KnowledgeBase).palette ?? FALLBACK_PALETTE,
           createdAt: (b as KnowledgeBase).createdAt ?? new Date(0).toISOString(),
           updatedAt: (b as KnowledgeBase).updatedAt ?? new Date(0).toISOString(),
