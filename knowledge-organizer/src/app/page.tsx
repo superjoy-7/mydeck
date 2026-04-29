@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { KnowledgeCard, ChatMessage, KnowledgeBase, generateId, isValidXiaohongshuUrl, extractTitle } from '@/lib/types';
-import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById, renameKnowledgeBase, resolveKnowledgeBaseFromAIResult } from '@/lib/data';
+import { loadCards, getCardsByBase, searchCards, deleteCard, getAllBases, getBaseCardCount, getBaseColor, getBaseName, getBasePalette, loadSessions, saveSessions, getAllBaseNames, addCard, createKnowledgeBase, moveCardToKnowledgeBase, createKnowledgeBaseAndMoveCard, deleteKnowledgeBase, getBaseById, renameKnowledgeBase, resolveKnowledgeBaseFromAIResult, updateCardStatus, updateCardNoteValue, bulkUpdateCardStatus, getSelectedCards } from '@/lib/data';
 import { generateKnowledgeCard, generateChatResponse, isLLMConfiguredAsync, understandImage, extractLinkContent, CardReference } from '@/lib/llm';
-import { exportBackup, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
+import { exportBackup, exportNotes, exportSelectedNotes, validateBackupJson, restoreFromBackup, type BackupManifest } from '@/lib/backup';
 import { readImageFile, revokePreview, formatFileSize, ImageUpload } from '@/lib/image';
 
 interface ChatSession {
@@ -21,6 +21,9 @@ export default function Home() {
   const [cards, setCards] = useState<KnowledgeCard[]>([]);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedBaseId, setSelectedBaseId] = useState<string>('all');
+  // Filters for "全部知识卡片" page
+  const [filterStatus, setFilterStatus] = useState<KnowledgeCard['note_status'] | 'all'>('all');
+  const [filterType, setFilterType] = useState<KnowledgeCard['note_value'] | 'all'>('all');
   const [linkInput, setLinkInput] = useState('');
   const [textInput, setTextInput] = useState('');
   const [showTextArea, setShowTextArea] = useState(false);
@@ -80,7 +83,13 @@ export default function Home() {
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Card detail modal
-  const [selectedCard, setSelectedCard] = useState<KnowledgeCard | null>(null);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+
+  // Derive selectedCard from current cards state — always fresh, never a stale snapshot
+  const selectedCard = useMemo(
+    () => (selectedCardId ? cards.find(c => c.id === selectedCardId) ?? null : null),
+    [cards, selectedCardId],
+  );
 
   // Chat panel collapse state
   const [chatPanelCollapsed, setChatPanelCollapsed] = useState(false);
@@ -88,6 +97,7 @@ export default function Home() {
   // Backup panel state
   const [showBackup, setShowBackup] = useState(false);
   const [backupFeedback, setBackupFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [autoMarkExported, setAutoMarkExported] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize on mount (client-only)
@@ -127,11 +137,17 @@ export default function Home() {
     setKnowledgeBases(getAllBases());
   }, [mounted]);
 
-  // Derived: visible cards filtered by selected base — does NOT mutate cards state
+  // Derived: visible cards filtered by selected base + optional status/type filters — does NOT mutate cards state
   const visibleCards = useMemo(() => {
-    if (selectedBaseId === 'all') return cards;
-    return cards.filter(c => c.knowledgeBaseId === selectedBaseId);
-  }, [cards, selectedBaseId]);
+    let result = selectedBaseId === 'all' ? cards : cards.filter(c => c.knowledgeBaseId === selectedBaseId);
+    if (filterStatus !== 'all') {
+      result = result.filter(c => c.note_status === filterStatus);
+    }
+    if (filterType !== 'all') {
+      result = result.filter(c => c.note_value === filterType);
+    }
+    return result;
+  }, [cards, selectedBaseId, filterStatus, filterType]);
 
   // Scroll to bottom of chat
   useEffect(() => {
@@ -276,9 +292,14 @@ export default function Home() {
       let title = '';
       let summary = '';
       let key_points: string[] = [];
-      let actionable_tips: string[] = [];
-      let tags: string[] = [];
       let suggestedBase = '其他';
+      // New structured fields
+      let raw_input = content;
+      let core_takeaway = '';
+      let outline_points: string[] = [];
+      let note_value: KnowledgeCard['note_value'] = 'other';
+      let core_structure: KnowledgeCard['core_structure'] = undefined;
+      let outline: KnowledgeCard['outline'] = undefined;
       let finalUrl = url;
       let finalContent = content;
 
@@ -291,9 +312,13 @@ export default function Home() {
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
-        actionable_tips = result.actionable_tips;
-        tags = result.tags;
         suggestedBase = result.suggested_base;
+        raw_input = result.raw_input ?? content;
+        core_takeaway = result.core_takeaway ?? summary;
+        outline_points = result.outline_points ?? key_points;
+        note_value = result.note_value ?? 'other';
+        core_structure = result.core_structure;
+        outline = result.outline;
 
         // If multiple images, append note
         if (imageUploads.length > 1) {
@@ -331,9 +356,13 @@ export default function Home() {
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
-        actionable_tips = result.actionable_tips;
-        tags = result.tags;
         suggestedBase = result.suggested_base;
+        raw_input = result.raw_input ?? finalContent;
+        core_takeaway = result.core_takeaway ?? summary;
+        outline_points = result.outline_points ?? key_points;
+        note_value = result.note_value ?? 'other';
+        core_structure = result.core_structure;
+        outline = result.outline;
 
         // Use extracted title if LLM title is generic
         if (extractResult.title && extractResult.title !== new URL(finalUrl).hostname) {
@@ -345,9 +374,13 @@ export default function Home() {
         title = result.title;
         summary = result.summary;
         key_points = result.key_points;
-        actionable_tips = result.actionable_tips;
-        tags = result.tags;
         suggestedBase = result.suggested_base;
+        raw_input = result.raw_input ?? content;
+        core_takeaway = result.core_takeaway ?? summary;
+        outline_points = result.outline_points ?? key_points;
+        note_value = result.note_value ?? 'other';
+        core_structure = result.core_structure;
+        outline = result.outline;
       }
 
       // Use LLM title if good, otherwise fallback to extractTitle
@@ -366,11 +399,18 @@ export default function Home() {
         original_text: isLinkExtractionMode ? '' : finalContent,
         summary: summary || finalContent.substring(0, 120),
         key_points: key_points.length > 0 ? key_points : ['暂无明确的要点提炼'],
-        actionable_tips: actionable_tips || [],
-        tags: tags.length > 0 ? tags : ['其他'],
         knowledgeBaseId: resolvedBase?.id ?? null,
         knowledge_base: resolvedBase?.name ?? (suggestedBase || '其他'),
         created_at: new Date().toISOString(),
+        // New structured fields
+        raw_input: raw_input || finalContent,
+        core_takeaway: core_takeaway || summary || finalContent.substring(0, 150),
+        outline_points: outline_points.length > 0 ? outline_points : key_points,
+        note_value: note_value,
+        note_status: 'pending',
+        updated_at: new Date().toISOString(),
+        ...(core_structure ? { core_structure } : {}),
+        ...(outline ? { outline } : {}),
       };
 
       // Save to storage
@@ -415,7 +455,7 @@ export default function Home() {
       setCreateBaseInput('');
       setShowCreateBase(false);
     } catch (err) {
-      // silently ignore duplicate/empty
+      // silently ignore duplicate/empty — UI already shows empty state
     }
   }, [createBaseInput]);
 
@@ -425,22 +465,43 @@ export default function Home() {
     if (!updated) return;
     setCards(prev => prev.map(c => c.id === cardId ? updated : c));
     setKnowledgeBases(getAllBases());
-    setSelectedCard(updated);
+    setSelectedCardId(cardId);
     setEditingCardId(null);
+  }, []);
+
+  // Update a card's note_status from the detail modal
+  const handleCardStatusChange = useCallback((cardId: string, status: KnowledgeCard['note_status']) => {
+    const updated = updateCardStatus(cardId, status);
+    if (!updated) return;
+    setCards(prev => prev.map(c => c.id === cardId ? updated : c));
+    setSelectedCardId(cardId);
+  }, []);
+
+  // Update a card's note_value (content type) from the detail modal
+  const handleCardTypeChange = useCallback((cardId: string, noteValue: KnowledgeCard['note_value']) => {
+    const updated = updateCardNoteValue(cardId, noteValue);
+    if (!updated) return;
+    setCards(prev => prev.map(c => c.id === cardId ? updated : c));
+    setSelectedCardId(cardId);
   }, []);
 
   // Create a new base from within the card detail modal and move the card to it
   const handleCreateBaseFromModal = useCallback((baseName: string) => {
     const cardId = selectedCard?.id;
     if (!cardId) return;
-    const newBase = createKnowledgeBase(baseName);
-    if (!newBase) return;
+    let newBase;
+    try {
+      newBase = createKnowledgeBase(baseName);
+    } catch {
+      // Base with this name already exists — silently ignore, don't move card
+      return;
+    }
     // moveCardToKnowledgeBase returns the updated card — use it directly to refresh modal
     const updated = moveCardToKnowledgeBase(cardId, newBase.id);
     if (!updated) return;
     setCards(prev => prev.map(c => c.id === cardId ? updated : c));
     setKnowledgeBases(getAllBases());
-    setSelectedCard({ ...updated });
+    setSelectedCardId(cardId);
     setEditingCardId(null);
   }, [selectedCard]);
 
@@ -918,14 +979,14 @@ export default function Home() {
           {showBackup && (
             <div className="mt-2 space-y-2">
               <p className="text-xs px-1" style={{ color: '#8A9199' }}>
-                当前数据仅保存在本浏览器，建议定期导出备份
+                三种导出模式，按需选择
               </p>
 
-              {/* Export button */}
+              {/* ① 全量备份导出 */}
               <button
                 onClick={() => {
                   exportBackup();
-                  setBackupFeedback({ type: 'success', message: '备份文件已开始下载' });
+                  setBackupFeedback({ type: 'success', message: '系统备份已开始下载' });
                   setTimeout(() => setBackupFeedback(null), 3000);
                 }}
                 className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-medium transition-all"
@@ -936,8 +997,83 @@ export default function Home() {
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
-                导出全部数据
+                全量备份导出
               </button>
+              <p className="text-xs px-1 -mt-1" style={{ color: '#B0B8C1' }}>用于恢复网站状态，完整数据</p>
+
+              {/* ② 全量笔记导出 */}
+              <button
+                onClick={() => {
+                  const pendingCount = cards.filter(c => c.note_status === 'pending').length;
+                  exportNotes((count) => {
+                    if (count > 0) {
+                      const pendingIds = cards.filter(c => c.note_status === 'pending').map(c => c.id);
+                      bulkUpdateCardStatus(pendingIds, 'exported');
+                      setCards(loadCards()); // refresh all components
+                      setBackupFeedback({ type: 'success', message: `全量笔记已导出，其中 ${count} 张待整理卡片标记为已导出` });
+                    }
+                  });
+                  if (pendingCount === 0) {
+                    setBackupFeedback({ type: 'success', message: '全量笔记已开始下载（当前无待整理卡片）' });
+                  }
+                  setTimeout(() => setBackupFeedback(null), 4000);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-medium transition-all"
+                style={{ backgroundColor: '#F0F1F0', color: '#42423A' }}
+                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#E4E7E4'}
+                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#F0F1F0'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                全量笔记导出
+              </button>
+              <p className="text-xs px-1 -mt-1" style={{ color: '#B0B8C1' }}>导出全部笔记，待整理卡片自动标记已导出</p>
+
+              {/* ③ 增量笔记导出 */}
+              <button
+                onClick={() => {
+                  const selectedIds = getSelectedCards().map(c => c.id);
+                  exportSelectedNotes();
+                  if (autoMarkExported && selectedIds.length > 0) {
+                    bulkUpdateCardStatus(selectedIds, 'exported');
+                    // Refresh cards state so all components (modal, list, count) re-render consistently
+                    setCards(loadCards());
+                    setBackupFeedback({ type: 'success', message: `已导出 ${selectedIds.length} 张待整理卡片并标记为已导出` });
+                  } else {
+                    setBackupFeedback({ type: 'success', message: '导出已开始下载，请稍后' });
+                  }
+                  setTimeout(() => setBackupFeedback(null), 4000);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-medium transition-all"
+                style={{ backgroundColor: '#EDF3EB', color: '#4E6B42' }}
+                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#E0EDE3'}
+                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#EDF3EB'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                导出待整理卡片
+              </button>
+              <p className="text-xs px-1 -mt-1" style={{ color: '#B0B8C1' }}>
+                仅导出「待整理」卡片，共 {getSelectedCards().length} 张
+              </p>
+
+              {/* Auto-mark option */}
+              <label className="flex items-center gap-2 px-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoMarkExported}
+                  onChange={e => setAutoMarkExported(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded"
+                />
+                <span className="text-xs" style={{ color: '#8A9199' }}>
+                  导出后自动标记为已导出
+                </span>
+              </label>
+
+              {/* Divider */}
+              <div className="border-t" style={{ borderColor: '#E8EAED' }} />
 
               {/* Import button */}
               <button
@@ -983,7 +1119,7 @@ export default function Home() {
                   const { data } = validation;
 
                   const confirmed = window.confirm(
-                    `即将用备份覆盖当前数据（${data.cards.length} 张卡片，${data.sessions.length} 条对话）。\n\n建议：导入前先点击「导出全部数据」保留当前备份。\n\n确认继续吗？`,
+                    `即将用备份覆盖当前数据（${data.cards.length} 张卡片，${data.sessions.length} 条对话）。\n\n建议：导入前先点击「全量备份导出」保留当前备份。\n\n确认继续吗？`,
                   );
                   if (!confirmed) {
                     e.target.value = '';
@@ -1064,6 +1200,55 @@ export default function Home() {
             </div>
           </div>
         </header>
+
+        {/* Filter bar — only shown on "全部知识卡片" page */}
+        {selectedBaseId === 'all' && (
+          <div
+            className="px-6 py-3 border-b flex flex-col gap-2"
+            style={{ backgroundColor: '#FFFFFF', borderColor: '#DFE2DE' }}
+          >
+            {/* Status filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs" style={{ color: '#8A9199' }}>状态</span>
+              <div className="flex items-center gap-1">
+                {([['all', '全部'], ['pending', '待整理'], ['exported', '已导出'], ['archived', '已归档']] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setFilterStatus(val as typeof filterStatus)}
+                    className="text-xs px-2 py-0.5 rounded-full transition-all"
+                    style={{
+                      backgroundColor: filterStatus === val ? '#769365' : '#F0F1F0',
+                      color: filterStatus === val ? '#FFFFFF' : '#8A9199',
+                      fontWeight: filterStatus === val ? '600' : '400',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Content type filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs" style={{ color: '#8A9199' }}>类型</span>
+              <div className="flex items-center gap-1 flex-wrap">
+                {([['all', '全部'], ['methodology', '方法论'], ['template', '模板'], ['knowledge', '知识库'], ['resource', '资源库'], ['other', '其它']] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setFilterType(val as typeof filterType)}
+                    className="text-xs px-2 py-0.5 rounded-full transition-all"
+                    style={{
+                      backgroundColor: filterType === val ? '#769365' : '#F0F1F0',
+                      color: filterType === val ? '#FFFFFF' : '#8A9199',
+                      fontWeight: filterType === val ? '600' : '400',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto">
@@ -1379,7 +1564,7 @@ export default function Home() {
                     card={card}
                     knowledgeBases={knowledgeBases}
                     onDelete={handleDeleteCard}
-                    onViewDetail={setSelectedCard}
+                    onViewDetail={(card) => setSelectedCardId(card.id)}
                   />
                 ))}
               </div>
@@ -1635,10 +1820,12 @@ export default function Home() {
       {selectedCard && (
         <CardDetailModal
           card={selectedCard}
-          onClose={() => setSelectedCard(null)}
+          onClose={() => setSelectedCardId(null)}
           knowledgeBases={knowledgeBases}
           onBaseChange={handleCardBaseChange}
           onCreateBase={handleCreateBaseFromModal}
+          onStatusChange={handleCardStatusChange}
+          onTypeChange={handleCardTypeChange}
         />
       )}
 
@@ -1766,6 +1953,21 @@ export default function Home() {
   );
 }
 
+// --- Status badge helpers ---
+const STATUS_META: Record<KnowledgeCard['note_status'], { label: string; bg: string; color: string }> = {
+  pending:  { label: '待整理', bg: '#EDF3EB', color: '#4E6B42' },
+  exported: { label: '已导出', bg: '#EBF3F8', color: '#2D6A8F' },
+  archived: { label: '已归档', bg: '#F0F1F0', color: '#8A9199' },
+};
+
+const NOTE_VALUE_META: Record<KnowledgeCard['note_value'], { label: string; bg: string; color: string }> = {
+  methodology: { label: '方法论', bg: '#EDF3EB', color: '#4E6B42' },
+  template:   { label: '模板',   bg: '#FEF9E7', color: '#8A6A1A' },
+  knowledge:  { label: '知识库', bg: '#EBF3F8', color: '#2D6A8F' },
+  resource:   { label: '资源库', bg: '#F5F0F8', color: '#6B4E8A' },
+  other:      { label: '其它',   bg: '#F0F1F0', color: '#8A9199' },
+};
+
 // --- Knowledge Card Component with Delete & Detail ---
 function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }: { card: KnowledgeCard; knowledgeBases: KnowledgeBase[]; onDelete: (id: string) => void; onViewDetail: (card: KnowledgeCard) => void }) {
   const [showDelete, setShowDelete] = useState(false);
@@ -1804,6 +2006,18 @@ function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }
                   {cardBaseInfo.name}
                 </span>
               )}
+              <span
+                className="text-xs px-1.5 py-0.5 rounded-full text-white"
+                style={{ backgroundColor: cardBaseInfo.palette.main }}
+              >
+                {STATUS_META[card.note_status]?.label}
+              </span>
+              <span
+                className="text-xs px-1.5 py-0.5 rounded-full text-white"
+                style={{ backgroundColor: cardBaseInfo.palette.main }}
+              >
+                {NOTE_VALUE_META[card.note_value]?.label}
+              </span>
               <span className="text-xs" style={{ color: '#8A9199' }}>
                 {new Date(card.created_at).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
               </span>
@@ -1880,37 +2094,6 @@ function KnowledgeCardComponent({ card, knowledgeBases, onDelete, onViewDetail }
         </div>
       )}
 
-      {/* Tags */}
-      {card.tags.length > 0 && (
-        <div className="px-5 pb-4">
-          <div className="flex flex-wrap gap-1.5">
-            {card.tags.slice(0, 4).map((tag) => (
-              <span
-                key={tag}
-                className="text-xs px-2 py-0.5 rounded-full"
-                style={{ backgroundColor: '#F0F1F0', color: '#42423A' }}
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Actionable Tips */}
-      {card.actionable_tips.length > 0 && (
-        <div className="px-5 pb-5">
-          <div className="rounded-xl p-3" style={{ backgroundColor: cardBaseInfo.palette.light }}>
-            <p className="text-xs font-medium flex items-center gap-1 mb-1" style={{ color: cardBaseInfo.palette.text }}>
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-              </svg>
-              可执行建议
-            </p>
-            <p className="text-xs line-clamp-2" style={{ color: cardBaseInfo.palette.text }}>{card.actionable_tips[0]}</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -2083,12 +2266,16 @@ function CardDetailModal({
   knowledgeBases,
   onBaseChange,
   onCreateBase,
+  onStatusChange,
+  onTypeChange,
 }: {
   card: KnowledgeCard;
   onClose: () => void;
   knowledgeBases: KnowledgeBase[];
   onBaseChange: (cardId: string, baseId: string | null) => void;
   onCreateBase: (baseName: string) => void;
+  onStatusChange: (cardId: string, status: KnowledgeCard['note_status']) => void;
+  onTypeChange: (cardId: string, noteValue: KnowledgeCard['note_value']) => void;
 }) {
   const modalBaseInfoMap = useMemo(() => {
     const map: Record<string, { name: string; palette: { main: string; light: string; text: string } }> = {};
@@ -2257,6 +2444,25 @@ function CardDetailModal({
               <span className="text-xs" style={{ color: '#8A9199' }}>
                 {new Date(card.created_at).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })}
               </span>
+              {/* Status management */}
+              <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                <span className="text-xs" style={{ color: '#8A9199' }}>状态：</span>
+                {(['pending', 'exported', 'archived'] as KnowledgeCard['note_status'][]).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => { if (s !== card.note_status) onStatusChange(card.id, s); }}
+                    className="text-xs px-1.5 py-0.5 rounded-full transition-all"
+                    style={{
+                      backgroundColor: s === card.note_status ? kbInfo.palette.main : '#F0F1F0',
+                      color: s === card.note_status ? '#FFFFFF' : '#8A9199',
+                      fontWeight: s === card.note_status ? '600' : '400',
+                    }}
+                    title={`设为 ${STATUS_META[s]?.label}`}
+                  >
+                    {STATUS_META[s]?.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
           <button
@@ -2282,6 +2488,62 @@ function CardDetailModal({
             </div>
           )}
 
+          {/* Note value type toggle */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs" style={{ color: '#8A9199' }}>类型</span>
+            {(Object.keys(NOTE_VALUE_META) as KnowledgeCard['note_value'][]).map(nv => (
+              <button
+                key={nv}
+                onClick={() => { if (nv !== card.note_value) onTypeChange(card.id, nv); }}
+                className="text-xs px-1.5 py-0.5 rounded-full transition-all"
+                style={{
+                  backgroundColor: nv === card.note_value ? kbInfo.palette.main : '#F0F1F0',
+                  color: nv === card.note_value ? '#FFFFFF' : '#8A9199',
+                  fontWeight: nv === card.note_value ? '600' : '400',
+                }}
+                title={`设为 ${NOTE_VALUE_META[nv]?.label}`}
+              >
+                {NOTE_VALUE_META[nv]?.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Outline — hierarchical document structure */}
+          {card.outline && card.outline.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium mb-2" style={{ color: '#8A9199' }}>大纲架构</h3>
+              <div className="space-y-1.5">
+                {card.outline.map((node, i) => (
+                  <div key={i}>
+                    <div className="text-sm font-medium" style={{ color: '#42423A' }}>
+                      {node.title}
+                    </div>
+                    {node.children && node.children.length > 0 && (
+                      <div className="ml-3 mt-1 space-y-1 pl-2 border-l" style={{ borderColor: kbInfo.palette.light }}>
+                        {node.children.map((child, j) => (
+                          <div key={j}>
+                            <div className="text-sm" style={{ color: '#5A5F58' }}>
+                              {child.title}
+                            </div>
+                            {child.children && child.children.length > 0 && (
+                              <div className="ml-3 mt-0.5 space-y-0.5 pl-2 border-l" style={{ borderColor: kbInfo.palette.light }}>
+                                {child.children.map((grandchild, k) => (
+                                  <div key={k} className="text-sm" style={{ color: '#8A9199' }}>
+                                    {grandchild.title}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Key Points */}
           {card.key_points.length > 0 && card.key_points[0] !== '暂无明确的要点提炼' && (
             <div>
@@ -2292,38 +2554,6 @@ function CardDetailModal({
                     <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: kbInfo.palette.main }} />
                     <span className="text-sm leading-relaxed" style={{ color: '#42423A' }}>{point}</span>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Actionable Tips */}
-          {card.actionable_tips.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium mb-2" style={{ color: '#8A9199' }}>可执行建议</h3>
-              <div className="space-y-2">
-                {card.actionable_tips.map((tip, i) => (
-                  <div key={i} className="rounded-xl p-3" style={{ backgroundColor: kbInfo.palette.light }}>
-                    <p className="text-sm leading-relaxed" style={{ color: kbInfo.palette.text }}>{tip}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Tags */}
-          {card.tags.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium mb-2" style={{ color: '#8A9199' }}>标签</h3>
-              <div className="flex flex-wrap gap-2">
-                {card.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="text-xs px-2.5 py-1 rounded-full"
-                    style={{ backgroundColor: '#F0F1F0', color: '#42423A' }}
-                  >
-                    {tag}
-                  </span>
                 ))}
               </div>
             </div>

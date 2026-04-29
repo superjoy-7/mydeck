@@ -92,11 +92,21 @@ function cleanCardForExport(card: KnowledgeCard): KnowledgeCard {
     original_text: card.source_type === 'link' ? '' : (card.original_text ?? ''),
     summary: card.summary ?? '',
     key_points: Array.isArray(card.key_points) ? card.key_points : [],
-    actionable_tips: Array.isArray(card.actionable_tips) ? card.actionable_tips : [],
-    tags: Array.isArray(card.tags) ? card.tags : [],
+    actionable_tips: [],
+    tags: [],
     knowledgeBaseId: card.knowledgeBaseId ?? null,
     knowledge_base: card.knowledge_base ?? '其他',
     created_at: card.created_at ?? new Date().toISOString(),
+    // New structured fields (mirror legacy for compat)
+    raw_input: card.raw_input ?? card.original_text ?? '',
+    raw_excerpt: card.raw_excerpt,
+    core_takeaway: card.core_takeaway ?? card.summary ?? '',
+    outline_points: Array.isArray(card.outline_points) ? card.outline_points : [],
+    cleaned_tags: [],
+    note_value: card.note_value ?? 'pending',
+    note_status: card.note_status ?? 'pending',
+    updated_at: card.updated_at ?? card.created_at ?? new Date().toISOString(),
+    exported_at: card.exported_at,
   };
 }
 
@@ -129,6 +139,32 @@ function cleanSessionForExport(session: ChatSession): ChatSession {
 }
 
 // ---------------------------------------------------------------------------
+// Export helpers
+// ---------------------------------------------------------------------------
+
+function datestamp(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+  ].join('-');
+}
+
+function triggerDownload(url: string, filename: string): void {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -157,26 +193,134 @@ export function exportBackup(): void {
   const json = safeStringify(manifest);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const dateStr = [
-    now.getFullYear(),
-    pad(now.getMonth() + 1),
-    pad(now.getDate()),
-    pad(now.getHours()),
-    pad(now.getMinutes()),
-  ].join('-');
-  const filename = `mydeck-backup-${dateStr}.json`;
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  triggerDownload(url, `mydeck-backup-${datestamp()}.json`);
 }
+
+// ---------------------------------------------------------------------------
+// Note export — for Codex / Obsidian consumption
+// ---------------------------------------------------------------------------
+
+/** A single card formatted for note-taking tools */
+export interface NoteCardExport {
+  id: string;
+  title: string;
+  knowledge_base: string;
+  knowledge_path: string;       // knowledge_base as a path-like string
+  note_value: KnowledgeCard['note_value'];
+  note_status: KnowledgeCard['note_status'];
+  created_at: string;
+  updated_at: string;
+  core_takeaway: string;        // primary display field
+  outline_points: string[];     // primary display field
+  raw_excerpt?: string;
+  raw_input: string;            // preserved for知识完整性
+  // Legacy fields — kept for backward compat with existing Codex prompts
+  summary: string;
+  key_points: string[];
+}
+
+function cardToNoteExport(card: KnowledgeCard, baseName: string): NoteCardExport {
+  return {
+    id: card.id,
+    title: card.title,
+    knowledge_base: baseName,
+    knowledge_path: baseName,   // Could be extended to "AI工具/Vibe Coding" later
+    note_value: card.note_value,
+    note_status: card.note_status,
+    created_at: card.created_at,
+    updated_at: card.updated_at,
+    core_takeaway: card.core_takeaway,
+    outline_points: card.outline_points,
+    raw_excerpt: card.raw_excerpt,
+    raw_input: card.raw_input,
+    // Legacy mirrors
+    summary: card.summary,
+    key_points: card.key_points,
+  };
+}
+
+/** Export ALL cards as notes (full notes export — for large整理). */
+export function exportNotes(onExported?: (count: number) => void): void {
+  const cards = loadCards();
+  const bases = loadAllBases();
+  const baseIdToName = new Map(bases.map(b => [b.id, b.name]));
+
+  const notes: NoteCardExport[] = cards.map(card => {
+    const baseName = card.knowledgeBaseId
+      ? (baseIdToName.get(card.knowledgeBaseId) ?? card.knowledge_base)
+      : (card.knowledge_base ?? '其他');
+    return cardToNoteExport(card, baseName);
+  });
+
+  const manifest = {
+    app: 'MyDeck',
+    version: '1.0',
+    schemaVersion: 2,
+    type: 'notes',            // distinguishes from 'backup'
+    exportedAt: new Date().toISOString(),
+    total: notes.length,
+    notes,
+  };
+
+  const json = safeStringify(manifest);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const filename = `mydeck-notes-${datestamp()}.json`;
+  triggerDownload(url, filename);
+
+  // Only auto-mark pending cards as exported — preserves already-exported cards
+  if (onExported) {
+    const pendingCards = cards.filter(c => c.note_status === 'pending');
+    if (pendingCards.length > 0) {
+      onExported(pendingCards.length);
+    }
+  }
+}
+
+/**
+ * Export only cards with note_status = 'pending' (incremental export for Codex).
+ * Optionally filter by knowledgeBaseId.
+ */
+export function exportSelectedNotes(baseId?: string | null): void {
+  let cards = loadCards().filter(c => c.note_status === 'pending');
+  if (baseId) {
+    cards = cards.filter(c => c.knowledgeBaseId === baseId);
+  }
+  if (cards.length === 0) {
+    alert('没有待导出的卡片（note_status = selected）。\n\n请先在卡片上标记"待整理"状态。');
+    return;
+  }
+
+  const bases = loadAllBases();
+  const baseIdToName = new Map(bases.map(b => [b.id, b.name]));
+
+  const notes: NoteCardExport[] = cards.map(card => {
+    const baseName = card.knowledgeBaseId
+      ? (baseIdToName.get(card.knowledgeBaseId) ?? card.knowledge_base)
+      : (card.knowledge_base ?? '其他');
+    return cardToNoteExport(card, baseName);
+  });
+
+  const manifest = {
+    app: 'MyDeck',
+    version: '1.0',
+    schemaVersion: 2,
+    type: 'notes',             // distinguishes from 'backup'
+    exportMode: 'incremental',  // distinguishes from 'full'
+    exportedAt: new Date().toISOString(),
+    total: notes.length,
+    notes,
+  };
+
+  const json = safeStringify(manifest);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const filename = `mydeck-notes-incremental-${datestamp()}.json`;
+  triggerDownload(url, filename);
+}
+
+// ---------------------------------------------------------------------------
+// Import validation
 
 // ---------------------------------------------------------------------------
 // Import validation

@@ -1,5 +1,20 @@
-import { KnowledgeCard, KnowledgeBase, ChatSession } from './types';
+import { KnowledgeCard, KnowledgeBase, ChatSession, generateId } from './types';
 import { BASE_PALETTES, FALLBACK_PALETTE, DYNAMIC_BASE_COLORS } from './classify';
+
+/** Map legacy note_value strings to the current 5-type system */
+function migrateNoteValue(raw: string | undefined): KnowledgeCard['note_value'] {
+  if (!raw) return 'other';
+  const map: Record<string, KnowledgeCard['note_value']> = {
+    // Legacy values → current values
+    method: 'methodology', idea: 'methodology', reference: 'methodology',
+    template: 'template',
+    concept: 'knowledge',
+    resource: 'resource',
+    // Legacy archive/pending → other
+    archive: 'other', pending: 'other',
+  };
+  return map[raw] ?? 'other';
+}
 
 const CARDS_KEY = 'ko_cards';
 const BASES_KEY = 'ko_bases';
@@ -25,12 +40,31 @@ function assignPalette(baseName: string, usedMainColors: Set<string>): { main: s
 // Knowledge Base CRUD — independent, persistent entities
 // ---------------------------------------------------------------------------
 
-/** Load all bases, migrating legacy formats. No repairBases auto-creation. */
+/** Load all bases, migrating legacy formats + deduplicating. No repairBases auto-creation. */
 export function loadAllBases(): KnowledgeBase[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw: KnowledgeBase[] = JSON.parse(localStorage.getItem(BASES_KEY) || '[]');
-    return raw.map(base => {
+
+    // Deduplicate by id: keep the one with latest updatedAt when duplicates exist
+    const seenIds = new Map<string, KnowledgeBase>();
+    for (const base of raw) {
+      const existing = seenIds.get(base.id);
+      if (!existing) {
+        seenIds.set(base.id, base);
+      } else {
+        // Keep whichever has more recent updatedAt
+        const existingTime = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+        const incomingTime = base.updatedAt ? new Date(base.updatedAt).getTime() : 0;
+        if (incomingTime > existingTime) {
+          seenIds.set(base.id, base);
+        }
+      }
+    }
+
+    const deduplicated = Array.from(seenIds.values());
+
+    return deduplicated.map(base => {
       // Migrate legacy format (color string, missing updatedAt, missing aliases)
       const legacy = base as unknown as { color?: string };
       return {
@@ -79,7 +113,7 @@ export function createKnowledgeBase(name: string): KnowledgeBase {
   const now = new Date().toISOString();
 
   const newBase: KnowledgeBase = {
-    id: nameTrimmed, // id == name for canonical lookup simplicity
+    id: generateId(),
     name: nameTrimmed,
     aliases: [],
     palette,
@@ -99,8 +133,10 @@ export function renameKnowledgeBase(baseId: string, newName: string): void {
 
   const trimmed = newName.trim();
   if (!trimmed) return;
-  // Prevent name collision
-  if (bases.some(b => b.id !== baseId && b.name === trimmed)) return;
+  // If the new name is the same as current name, this is a no-op
+  if (bases[idx].name === trimmed) return;
+  // Prevent any name collision with other bases
+  if (bases.some(b => b.name === trimmed)) return;
 
   const oldName = bases[idx].name;
   // Push old name to aliases so AI results matching the old name still resolve correctly
@@ -179,6 +215,9 @@ export function resolveKnowledgeBaseFromAIResult(suggestedName: string): Knowled
     '其他',
   ];
   if (canonicalNames.includes(trimmed)) {
+    // Safeguard: if a base with this name already exists (even if id != name due to past bugs), use it
+    const existingByName = bases.find(b => b.name === trimmed);
+    if (existingByName) return existingByName;
     try {
       const newBase = createKnowledgeBase(trimmed);
       return newBase;
@@ -194,7 +233,7 @@ export function resolveKnowledgeBaseFromAIResult(suggestedName: string): Knowled
 // Card Storage + Legacy Migration
 // ---------------------------------------------------------------------------
 
-/** Load cards, migrating legacy format (knowledge_base string → knowledgeBaseId). */
+/** Load cards, migrating legacy format (knowledge_base string → knowledgeBaseId) and new fields. */
 export function loadCards(): KnowledgeCard[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -206,16 +245,30 @@ export function loadCards(): KnowledgeCard[] {
 
     const rawCards: KnowledgeCard[] = JSON.parse(stored);
     return rawCards.map(card => {
-      // Migrate: add knowledgeBaseId if missing
-      if (!('knowledgeBaseId' in (card as object))) {
+      // Migrate: add knowledgeBaseId if missing (legacy)
+      let knowledgeBaseId = (card as KnowledgeCard).knowledgeBaseId as string | null;
+      if (knowledgeBaseId === undefined) {
         const baseName = (card as KnowledgeCard).knowledge_base;
-        const baseId = baseName ? (baseNameToId.get(baseName) ?? null) : null;
-        return {
-          ...(card as KnowledgeCard),
-          knowledgeBaseId: baseId,
-        } satisfies KnowledgeCard;
+        knowledgeBaseId = baseName ? (baseNameToId.get(baseName) ?? null) : null;
       }
-      return card;
+
+      // Migrate: new structured fields default to mirrored legacy fields
+      const raw = card as KnowledgeCard;
+      const now = new Date().toISOString();
+
+      return {
+        ...raw,
+        knowledgeBaseId,
+        // New structured fields: fall back from legacy equivalents
+        raw_input:        raw.raw_input        ?? raw.original_text ?? '',
+        core_takeaway:    raw.core_takeaway    ?? raw.summary        ?? '',
+        outline_points:   raw.outline_points   ?? raw.key_points      ?? [],
+        cleaned_tags:     raw.cleaned_tags     ?? (Array.isArray(raw.tags) ? raw.tags : []),
+        // Status fields: sensible defaults for old cards
+        note_value:       migrateNoteValue(raw.note_value),
+        note_status:      raw.note_status      ?? 'pending',
+        updated_at:       raw.updated_at       ?? raw.created_at      ?? now,
+      } satisfies KnowledgeCard;
     });
   } catch {
     return [];
@@ -236,6 +289,102 @@ export function addCard(card: KnowledgeCard): void {
 export function deleteCard(cardId: string): void {
   const cards = loadCards();
   saveCards(cards.filter(c => c.id !== cardId));
+}
+
+/** Update a card's note_status and related timestamps. Returns the updated card, or null. */
+export function updateCardStatus(
+  cardId: string,
+  status: KnowledgeCard['note_status'],
+): KnowledgeCard | null {
+  const cards = loadCards();
+  const idx = cards.findIndex(c => c.id === cardId);
+  if (idx === -1) return null;
+
+  const now = new Date().toISOString();
+  const updates: Partial<KnowledgeCard> = {
+    note_status: status,
+    updated_at: now,
+  };
+  if (status === 'exported') updates.exported_at = now;
+
+  cards[idx] = { ...cards[idx], ...updates };
+  saveCards(cards);
+  return cards[idx];
+}
+
+/** Update a card's note_value (content type). Returns the updated card, or null. */
+export function updateCardNoteValue(
+  cardId: string,
+  noteValue: KnowledgeCard['note_value'],
+): KnowledgeCard | null {
+  const cards = loadCards();
+  const idx = cards.findIndex(c => c.id === cardId);
+  if (idx === -1) return null;
+
+  cards[idx] = {
+    ...cards[idx],
+    note_value: noteValue,
+    updated_at: new Date().toISOString(),
+  };
+  saveCards(cards);
+  return cards[idx];
+}
+
+/**
+ * Update note_status for multiple cards at once.
+ * Returns the count of updated cards.
+ */
+export function bulkUpdateCardStatus(
+  cardIds: string[],
+  status: KnowledgeCard['note_status'],
+): number {
+  if (cardIds.length === 0) return 0;
+  const cards = loadCards();
+  const now = new Date().toISOString();
+  const idSet = new Set(cardIds);
+  let count = 0;
+
+  for (let i = 0; i < cards.length; i++) {
+    if (idSet.has(cards[i].id)) {
+      const updates: Partial<KnowledgeCard> = {
+        note_status: status,
+        updated_at: now,
+      };
+      if (status === 'exported') updates.exported_at = now;
+      cards[i] = { ...cards[i], ...updates };
+      count++;
+    }
+  }
+
+  if (count > 0) saveCards(cards);
+  return count;
+}
+
+/**
+ * Get cards filtered by note_status.
+ * Use for "export selected" / incremental export scenarios.
+ */
+export function getCardsByStatus(status: KnowledgeCard['note_status']): KnowledgeCard[] {
+  return loadCards().filter(c => c.note_status === status);
+}
+
+/**
+ * Get cards by knowledge base AND note_status (for filtered incremental export).
+ */
+export function getCardsByBaseAndStatus(
+  baseId: string | null,
+  status: KnowledgeCard['note_status'],
+): KnowledgeCard[] {
+  return loadCards().filter(c =>
+    c.knowledgeBaseId === baseId && c.note_status === status,
+  );
+}
+
+/**
+ * Get all cards with note_status = 'pending' (default "ready to export" pool).
+ */
+export function getSelectedCards(): KnowledgeCard[] {
+  return getCardsByStatus('pending');
 }
 
 /**
@@ -286,7 +435,7 @@ export function searchCards(query: string, baseId?: string | null): KnowledgeCar
   return cards.filter(c =>
     c.title.toLowerCase().includes(q) ||
     c.summary.toLowerCase().includes(q) ||
-    c.tags.some(t => t.toLowerCase().includes(q)) ||
+    (c.tags ?? []).some(t => t.toLowerCase().includes(q)) ||
     c.key_points.some(p => p.toLowerCase().includes(q))
   );
 }

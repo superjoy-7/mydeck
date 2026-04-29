@@ -157,13 +157,24 @@ const NORMALIZATION_MAP: NormalizationEntry[] = [
   {
     canonical: '产品/商业观察',
     keywords: [
-      '产品经理', 'pm', 'prd', '产品设计', '产品策略',
-      '产品体验', '产品功能', '产品思考',
-      '商业模式', '盈利模式', '商业化', '变现',
-      '商业分析', '行业分析', '市场分析', '竞品分析',
+      // Core product terms
+      '产品经理', '产品设计', '产品策略', '产品分析', '产品体验', '产品功能', '产品思考',
+      '产品定位', '产品价值', '产品需求', '产品迭代', '产品路线',
+      '用户分析', '用户研究', '用户画像', '用户场景', '用户旅程',
+      '竞品分析', '竞品调研', '竞品研究', '竞争分析', '对标分析',
+      '业务分析', '业务模式', '业务流程', '业务拆解', '业务拓展',
+      '功能结构', '信息架构', '页面流程', '交互流程', '功能规划',
+      'onboarding', '激活流程', '新用户引导', '用户激活',
+      '产品体验报告', '产品体验分析', '产品体验优化',
+      '需求分析', '需求拆解', '需求优先级', '需求管理',
+      'PRD', 'MRD', 'BRD',
+      // Shorter terms that commonly appear
+      '产品', 'pm', 'prd',
+      // Business terms
+      '商业模式', '盈利模式', '商业化', '变现', '商业分析', '行业分析', '市场分析',
       '公司分析', '公司研究', '企业分析',
       '战略', '战略规划', '商业战略',
-      'product manager', 'product strategy', 'product market fit',
+      'product manager', 'product strategy', 'product market fit', 'product analysis',
       'startup', '创业', '融资', '投资',
       'saas商业模式', '订阅制',
     ],
@@ -393,10 +404,17 @@ export function classifyByKeywords(content: string, tags: string[]): CanonicalBa
     {
       base: '产品/商业观察',
       keywords: [
-        '产品经理', '产品设计', 'pm', 'prd',
+        '产品经理', '产品设计', 'pm', 'prd', '产品分析', '产品体验',
+        '产品定位', '产品价值', '产品需求', '产品迭代',
+        '用户分析', '用户研究', '用户画像', '用户场景',
+        '竞品分析', '竞品调研', '业务分析', '业务模式',
+        '功能结构', '信息架构', '页面流程', '交互流程',
+        'onboarding', '激活流程', '新用户引导',
+        '产品体验报告', '产品体验优化',
+        '需求分析', '需求拆解', '需求优先级',
         '商业模式', '商业分析', '行业分析', '竞品分析',
         '公司分析', '战略', '盈利模式',
-        'product manager', 'product strategy',
+        'product manager', 'product strategy', 'product analysis',
       ],
     },
   ];

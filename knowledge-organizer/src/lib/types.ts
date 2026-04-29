@@ -3,17 +3,65 @@ export interface KnowledgeCard {
   title: string;
   source_url: string;
   source_type: 'link' | 'text';
+  // --- Legacy display fields (kept for backward compat + fallback) ---
   original_text: string;
   summary: string;
   key_points: string[];
-  actionable_tips: string[];
-  tags: string[];
+  /** @deprecated Removed from primary UI — kept for backward compat during migration */
+  actionable_tips?: string[];
+  /** @deprecated Removed from primary UI — kept for backward compat during migration */
+  tags?: string[];
   /** Stable ID reference to knowledge base entity */
   knowledgeBaseId: string | null;
   /** Legacy display field — kept for backward compatibility, synced from knowledgeBaseId */
   knowledge_base: string;
   created_at: string;
+  // --- New structured fields (page rendering prefers these; fallbacks mirror legacy fields) ---
+  /** Raw original input — mirrors original_text, enables full content export */
+  raw_input: string;
+  /** Short excerpt if source is a link */
+  raw_excerpt?: string;
+  /** Condensed takeaway: 2-3 sentences, replaces summary as primary display */
+  core_takeaway: string;
+  /** Structured bullet points — replaces key_points as primary display */
+  outline_points: string[];
+  /** @deprecated Removed from primary UI — kept for backward compat during migration */
+  cleaned_tags?: string[];
+  /** Content type for note workflow — 方法论/模板/知识库/资源库/其它 */
+  note_value: 'methodology' | 'template' | 'knowledge' | 'resource' | 'other';
+  /** Processing state — pending = 待整理, exported = 已导出, archived = 已归档 */
+  note_status: 'pending' | 'exported' | 'archived';
+  /** Last modification time */
+  updated_at: string;
+  /** When this card was last exported as a note */
+  exported_at?: string;
+  /**
+   * Optional structured skeleton for framework/process/checklist content.
+   * Only present when the source has a clear structural organization.
+   * type: framework | process | checklist
+   */
+  core_structure?: {
+    type: 'framework' | 'process' | 'checklist';
+    title: string;
+    items: string[];
+  };
+  /**
+   * Hierarchical document outline — preserves the original heading structure.
+   * Only present when the source has clear title/subtitle hierarchies.
+   * Each item is a node: { title: string; children?: { title: string }[] }
+   */
+  outline?: OutlineNode[];
 }
+
+export type OutlineNode = {
+  title: string;
+  children?: OutlineChild[];
+};
+
+export type OutlineChild = {
+  title: string;
+  children?: { title: string }[];
+};
 
 export interface ChatMessage {
   id: string;

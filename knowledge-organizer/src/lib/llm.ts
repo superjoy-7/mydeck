@@ -14,7 +14,6 @@ export interface CardReference {
   title: string;
   summary: string;
   key_points: string[];
-  tags: string[];
 }
 
 // Check if LLM is configured by calling the server-side debug endpoint.
@@ -55,9 +54,24 @@ export async function generateKnowledgeCard(
   title: string;
   summary: string;
   key_points: string[];
-  actionable_tips: string[];
-  tags: string[];
   suggested_base: string;
+  // New structured fields
+  raw_input: string;
+  core_takeaway: string;
+  outline_points: string[];
+  note_value: 'methodology' | 'template' | 'knowledge' | 'resource' | 'other';
+  core_structure?: {
+    type: 'framework' | 'process' | 'checklist';
+    title: string;
+    items: string[];
+  };
+  outline?: {
+    title: string;
+    children?: {
+      title: string;
+      children?: { title: string }[];
+    }[];
+  }[];
 }> {
   const response = await fetch('/api/llm/card', {
     method: 'POST',
@@ -104,9 +118,24 @@ export async function understandImage(
   title: string;
   summary: string;
   key_points: string[];
-  actionable_tips: string[];
-  tags: string[];
   suggested_base: string;
+  // New structured fields
+  raw_input: string;
+  core_takeaway: string;
+  outline_points: string[];
+  note_value: 'methodology' | 'template' | 'knowledge' | 'resource' | 'other';
+  core_structure?: {
+    type: 'framework' | 'process' | 'checklist';
+    title: string;
+    items: string[];
+  };
+  outline?: {
+    title: string;
+    children?: {
+      title: string;
+      children?: { title: string }[];
+    }[];
+  }[];
 }> {
   const response = await fetch('/api/llm/vision', {
     method: 'POST',
